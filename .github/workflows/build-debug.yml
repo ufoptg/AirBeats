@@ -41,12 +41,41 @@ jobs:
           STATS_BASE_URL: ${{ secrets.STATS_BASE_URL }}
           AUTH_API_BASE_URL: ${{ secrets.AUTH_API_BASE_URL }}
         run: |
-          echo "${GOOGLE_SERVICES_JSON}" | base64 --decode > app/google-services.json
+          set -euo pipefail
 
-          echo "google.api.key=${GOOGLE_API_KEY}" >> local.properties
-          echo "stats.api.key=${STATS_API_KEY}" >> local.properties
-          echo "stats.base.url=${STATS_BASE_URL}" >> local.properties
-          echo "auth.api.base.url=${AUTH_API_BASE_URL}" >> local.properties
+          if [ -z "${GOOGLE_SERVICES_JSON}" ]; then
+            echo "::error::GOOGLE_SERVICES_JSON secret is empty"
+            exit 1
+          fi
+
+          # Accept either raw JSON or base64-encoded JSON.
+          TRIMMED="$(printf '%s' "${GOOGLE_SERVICES_JSON}" | sed -e 's/^[[:space:]]*//')"
+          if printf '%s' "${TRIMMED}" | head -c 1 | grep -q '{'; then
+            printf '%s\n' "${GOOGLE_SERVICES_JSON}" > app/google-services.json
+          else
+            printf '%s' "${GOOGLE_SERVICES_JSON}" | base64 --decode > app/google-services.json
+          fi
+
+          python3 - <<'PY'
+          import json, sys
+          path = "app/google-services.json"
+          try:
+              data = json.load(open(path))
+          except Exception as e:
+              print(f"::error::google-services.json is not valid JSON ({e})", file=sys.stderr)
+              sys.exit(1)
+          if not isinstance(data, dict) or ("project_info" not in data and "client" not in data):
+              print("::error::google-services.json is missing project_info/client — check GOOGLE_SERVICES_JSON secret (raw JSON or base64)", file=sys.stderr)
+              sys.exit(1)
+          print("google-services.json OK")
+          PY
+
+          {
+            echo "google.api.key=${GOOGLE_API_KEY}"
+            echo "stats.api.key=${STATS_API_KEY}"
+            echo "stats.base.url=${STATS_BASE_URL}"
+            echo "auth.api.base.url=${AUTH_API_BASE_URL}"
+          } >> local.properties
 
       - name: Build Debug APK
         run: ./gradlew assembleDebug
