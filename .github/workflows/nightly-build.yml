@@ -25,8 +25,11 @@ jobs:
           java-version: '21'
           distribution: 'temurin'
 
+      - name: Setup Gradle
+        uses: gradle/actions/setup-gradle@v4
+
       - name: Remove local Java path from gradle.properties
-        run: sed -i '/org.gradle.java.home/d' gradle.properties
+        run: sed -i '/^[[:space:]]*org\.gradle\.java\.home=/d' gradle.properties
 
       - name: Grant execute permission for gradlew
         run: chmod +x gradlew
@@ -35,23 +38,23 @@ jobs:
         run: |
           VERSION_CODE=$(grep -oP 'versionCode = \K\d+' app/build.gradle.kts)
           VERSION_NAME=$(grep -oP 'versionName = "\K[^"]+' app/build.gradle.kts)
-          
+
           NEW_VERSION_CODE=$((VERSION_CODE + 1))
-          
+
           IFS='.' read -r -a VERSION_PARTS <<< "$VERSION_NAME"
           PATCH_VERSION=${VERSION_PARTS[2]}
           NEW_PATCH_VERSION=$((PATCH_VERSION + 1))
           NEW_VERSION_NAME="${VERSION_PARTS[0]}.${VERSION_PARTS[1]}.$NEW_PATCH_VERSION"
-          
+
           sed -i "s/versionCode = $VERSION_CODE/versionCode = $NEW_VERSION_CODE/" app/build.gradle.kts
           sed -i "s/versionName = \"$VERSION_NAME\"/versionName = \"$NEW_VERSION_NAME\"/" app/build.gradle.kts
-          
+
           git config user.name "github-actions[bot]"
           git config user.email "github-actions[bot]@users.noreply.github.com"
           git add app/build.gradle.kts
           git commit -m "chore: Bump version to $NEW_VERSION_NAME (Nightly)"
           git push
-          
+
           echo "NEW_VERSION_NAME=$NEW_VERSION_NAME" >> $GITHUB_ENV
 
       - name: Inject Secrets
@@ -65,13 +68,13 @@ jobs:
         run: |
           echo "${GOOGLE_SERVICES_JSON}" | base64 --decode > app/google-services.json
           echo "${SIGNING_KEY_BASE64}" | base64 --decode > app/keystore.jks
-          
+
           echo "google.api.key=${GOOGLE_API_KEY}" >> local.properties
           echo "stats.api.key=${STATS_API_KEY}" >> local.properties
           echo "stats.base.url=${STATS_BASE_URL}" >> local.properties
           echo "auth.api.base.url=${AUTH_API_BASE_URL}" >> local.properties
 
-      - name: Build Release APK
+      - name: Build Nightly APK
         env:
           KEYSTORE_PASSWORD: ${{ secrets.KEYSTORE_PASSWORD }}
           KEY_PASSWORD: ${{ secrets.KEY_PASSWORD }}
@@ -84,7 +87,12 @@ jobs:
             -Pandroid.injected.signing.key.password="${KEY_PASSWORD}"
 
       - name: Rename APK
-        run: mv app/build/outputs/apk/nightly/app-nightly.apk Airbeats-v${{ env.NEW_VERSION_NAME }}-Nightly.apk
+        run: |
+          APK=$(find app/build/outputs/apk/nightly -name '*.apk' ! -name '*-unsigned.apk' | head -n 1)
+          if [ -z "$APK" ]; then
+            APK=$(find app/build/outputs/apk/nightly -name '*.apk' | head -n 1)
+          fi
+          mv "$APK" "Airbeats-v${NEW_VERSION_NAME}-Nightly.apk"
 
       - name: Update Nightly Release
         uses: softprops/action-gh-release@v2
@@ -95,7 +103,49 @@ jobs:
           prerelease: true
           files: Airbeats-v${{ env.NEW_VERSION_NAME }}-Nightly.apk
 
+  build-debug:
+    name: Build Debug APK
+    runs-on: ubuntu-latest
 
+    steps:
+      - name: Checkout Code
+        uses: actions/checkout@v4
 
+      - name: Set up JDK 21
+        uses: actions/setup-java@v4
+        with:
+          java-version: '21'
+          distribution: 'temurin'
 
+      - name: Setup Gradle
+        uses: gradle/actions/setup-gradle@v4
 
+      - name: Remove local Java path from gradle.properties
+        run: sed -i '/^[[:space:]]*org\.gradle\.java\.home=/d' gradle.properties
+
+      - name: Grant execute permission for gradlew
+        run: chmod +x gradlew
+
+      - name: Inject Secrets
+        env:
+          GOOGLE_SERVICES_JSON: ${{ secrets.GOOGLE_SERVICES_JSON }}
+          GOOGLE_API_KEY: ${{ secrets.GOOGLE_API_KEY }}
+          STATS_API_KEY: ${{ secrets.STATS_API_KEY }}
+          STATS_BASE_URL: ${{ secrets.STATS_BASE_URL }}
+          AUTH_API_BASE_URL: ${{ secrets.AUTH_API_BASE_URL }}
+        run: |
+          echo "${GOOGLE_SERVICES_JSON}" | base64 --decode > app/google-services.json
+
+          echo "google.api.key=${GOOGLE_API_KEY}" >> local.properties
+          echo "stats.api.key=${STATS_API_KEY}" >> local.properties
+          echo "stats.base.url=${STATS_BASE_URL}" >> local.properties
+          echo "auth.api.base.url=${AUTH_API_BASE_URL}" >> local.properties
+
+      - name: Build Debug APK
+        run: ./gradlew assembleDebug
+
+      - name: Upload Debug APK
+        uses: actions/upload-artifact@v4
+        with:
+          name: AirBeats-Debug-APK
+          path: app/build/outputs/apk/debug/*.apk
