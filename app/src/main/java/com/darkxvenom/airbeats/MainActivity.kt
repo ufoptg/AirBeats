@@ -12,6 +12,8 @@ import androidx.compose.foundation.isSystemInDarkTheme
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.material3.Text
 import androidx.compose.material3.Icon
+import androidx.compose.material3.CircularProgressIndicator
+import com.darkxvenom.airbeats.utils.AutoBackupManager
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.draw.shadow
 import androidx.compose.ui.graphics.graphicsLayer
@@ -43,7 +45,7 @@ import android.provider.Settings
 import android.util.Log
 import android.view.View
 import android.view.WindowManager
-import androidx.activity.ComponentActivity
+import androidx.fragment.app.FragmentActivity
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.compose.setContent
 import androidx.activity.result.contract.ActivityResultContracts
@@ -90,6 +92,9 @@ import androidx.compose.foundation.layout.systemBars
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material3.AlertDialogDefaults
+import androidx.compose.material3.AlertDialog
+import androidx.compose.material3.Button
+import androidx.compose.material3.TextButton
 import androidx.compose.material3.IconButton
 import androidx.compose.material3.LocalContentColor
 import androidx.compose.material3.MaterialTheme
@@ -122,10 +127,16 @@ import androidx.compose.ui.draw.drawWithContent
 import androidx.compose.ui.focus.FocusRequester
 import androidx.compose.ui.focus.focusRequester
 import com.darkxvenom.airbeats.ui.component.CircleIconButton
+import com.darkxvenom.airbeats.ui.component.SwipeBackContainer
+import com.darkxvenom.airbeats.ui.component.tabSwipeGesture
 import androidx.compose.ui.graphics.BlendMode
 import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.toArgb
+import androidx.lifecycle.viewmodel.compose.viewModel
+import com.darkxvenom.airbeats.viewmodels.RingtoneViewModel
+import com.darkxvenom.airbeats.ui.component.RingtoneTrimmerDialog
+import com.darkxvenom.airbeats.ui.component.RingtoneProgressDialog
 import androidx.compose.ui.input.nestedscroll.nestedScroll
 import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.platform.LocalConfiguration
@@ -158,6 +169,7 @@ import androidx.lifecycle.lifecycleScope
 import androidx.media3.common.MediaItem
 import androidx.media3.common.Player
 import androidx.navigation.NavDestination.Companion.hierarchy
+import androidx.navigation.NavGraph.Companion.findStartDestination
 import androidx.navigation.NavHostController
 import androidx.navigation.compose.NavHost
 import androidx.navigation.compose.currentBackStackEntryAsState
@@ -199,8 +211,8 @@ import com.darkxvenom.airbeats.ui.component.AvatarSelection
 import com.darkxvenom.airbeats.ui.component.BottomSheet
 import com.darkxvenom.airbeats.ui.component.BottomSheetMenu
 import com.darkxvenom.airbeats.ui.component.IconButton
-import com.darkxvenom.airbeats.ui.component.CurvedBottomNavigationBar
 import com.darkxvenom.airbeats.constants.LiquidGlassKey
+import com.darkxvenom.airbeats.constants.FrostedGlassCardsButtonsKey
 import com.darkxvenom.airbeats.constants.UseSystemFontKey
 import com.darkxvenom.airbeats.constants.AppFont
 import com.darkxvenom.airbeats.constants.AppFontKey
@@ -239,10 +251,13 @@ import com.darkxvenom.airbeats.ui.theme.DefaultThemeColor
 import com.darkxvenom.airbeats.ui.theme.AirBeatsTheme
 import com.darkxvenom.airbeats.ui.theme.extractThemeColor
 import com.darkxvenom.airbeats.ui.utils.appBarScrollBehavior
-import androidx.compose.animation.core.animateDpAsState
-import androidx.compose.animation.core.tween
+import com.darkxvenom.airbeats.constants.ReduceAnimationsKey
+import androidx.compose.animation.core.FastOutSlowInEasing
+import androidx.compose.animation.core.snap
 import com.darkxvenom.airbeats.ui.utils.backToMain
 import com.darkxvenom.airbeats.ui.utils.resetHeightOffset
+import com.darkxvenom.airbeats.ui.component.UpdateAvailableDialog
+import com.darkxvenom.airbeats.utils.UpdateInfo
 import com.darkxvenom.airbeats.utils.SyncUtils
 import com.darkxvenom.airbeats.utils.Updater
 import com.darkxvenom.airbeats.utils.dataStore
@@ -283,7 +298,7 @@ import kotlinx.coroutines.isActive
 
 @Suppress("DEPRECATION", "ASSIGNED_BUT_NEVER_ACCESSED_VARIABLE")
 @AndroidEntryPoint
-class MainActivity : ComponentActivity() {
+class MainActivity : FragmentActivity() {
     @Inject
     lateinit var database: MusicDatabase
 
@@ -295,6 +310,9 @@ class MainActivity : ComponentActivity() {
 
     @Inject
     lateinit var namePreferenceManager: NamePreferenceManager
+
+    @Inject
+    lateinit var lastFmAuthCallbackCoordinator: com.darkxvenom.airbeats.data.repository.LastFmAuthCallbackCoordinator
 
     private var playerConnection by mutableStateOf<PlayerConnection?>(null)
     private var isServiceBound = false
@@ -321,14 +339,26 @@ class MainActivity : ComponentActivity() {
     override fun onStart() {
         super.onStart()
         com.darkxvenom.airbeats.playback.AppForegroundTracker.isForeground = true
-        startService(Intent(this, MusicService::class.java))
+        if (Build.VERSION.SDK_INT < Build.VERSION_CODES.O) {
+            runCatching {
+                startService(Intent(this, MusicService::class.java))
+            }.onFailure { Timber.e(it, "Failed to start MusicService from MainActivity") }
+        }
         if (!isServiceBound) {
-            bindService(
-                Intent(this, MusicService::class.java),
-                serviceConnection,
-                Context.BIND_AUTO_CREATE
-            )
-            isServiceBound = true
+            runCatching {
+                bindService(
+                    Intent(this, MusicService::class.java),
+                    serviceConnection,
+                    Context.BIND_AUTO_CREATE
+                )
+            }.onSuccess { isServiceBound = it }
+             .onFailure { Timber.e(it, "Failed to bind MusicService from MainActivity") }
+        }
+        lifecycleScope.launch(Dispatchers.IO) {
+            runCatching {
+                database.checkpoint()
+                android.app.backup.BackupManager(this@MainActivity).dataChanged()
+            }
         }
     }
 
@@ -337,6 +367,12 @@ class MainActivity : ComponentActivity() {
         if (isServiceBound) {
             unbindService(serviceConnection)
             isServiceBound = false
+        }
+        lifecycleScope.launch(Dispatchers.IO) {
+            runCatching {
+                database.checkpoint()
+                android.app.backup.BackupManager(this@MainActivity).dataChanged()
+            }
         }
         super.onStop()
     }
@@ -373,12 +409,18 @@ class MainActivity : ComponentActivity() {
         )
     }
 
-    @RequiresApi(Build.VERSION_CODES.TIRAMISU)
+    override fun onNewIntent(intent: Intent) {
+        super.onNewIntent(intent)
+        setIntent(intent)
+        lastFmAuthCallbackCoordinator.capture(intent)
+    }
+
     @SuppressLint("UnusedMaterial3ScaffoldPaddingParameter")
     @OptIn(ExperimentalMaterial3Api::class)
     override fun onCreate(savedInstanceState: Bundle?) {
 
         super.onCreate(savedInstanceState)
+        lastFmAuthCallbackCoordinator.capture(intent)
 
         // 🔔 Notification permission
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
@@ -408,6 +450,42 @@ class MainActivity : ComponentActivity() {
                 }
             }
 
+        // 🔥 Version-specific FCM topic synchronization & auto-cleanup of outdated versions
+        val versionName = BuildConfig.VERSION_NAME
+        val fcmPrefs = getSharedPreferences("airbeats_fcm_prefs", Context.MODE_PRIVATE)
+        val lastSubscribedVersion = fcmPrefs.getString("last_subscribed_version", null)
+
+        if (!lastSubscribedVersion.isNullOrBlank() && lastSubscribedVersion != versionName) {
+            FirebaseMessaging.getInstance().unsubscribeFromTopic(lastSubscribedVersion)
+                .addOnSuccessListener {
+                    Log.d("FCM", "Unsubscribed from outdated version topic: $lastSubscribedVersion")
+                }
+            FirebaseMessaging.getInstance().unsubscribeFromTopic("v$lastSubscribedVersion")
+            FirebaseMessaging.getInstance().unsubscribeFromTopic("${lastSubscribedVersion}-nightly")
+            FirebaseMessaging.getInstance().unsubscribeFromTopic("v${lastSubscribedVersion}-nightly")
+        }
+
+        // Proactively unsubscribe from legacy version tags if updating from older releases
+        val legacyVersions = listOf(
+            "6.0.0", "6.0.1", "6.0.2", "6.0.3", "6.0.4", "6.1.0", "6.1.1", "6.1.2"
+        )
+        for (legacy in legacyVersions) {
+            if (legacy != versionName) {
+                FirebaseMessaging.getInstance().unsubscribeFromTopic(legacy)
+                FirebaseMessaging.getInstance().unsubscribeFromTopic("v$legacy")
+                FirebaseMessaging.getInstance().unsubscribeFromTopic("$legacy-nightly")
+                FirebaseMessaging.getInstance().unsubscribeFromTopic("v$legacy-nightly")
+            }
+        }
+
+        FirebaseMessaging.getInstance().subscribeToTopic(versionName)
+            .addOnCompleteListener {
+                if (it.isSuccessful) {
+                    Log.d("FCM", "Subscribed to $versionName")
+                    fcmPrefs.edit().putString("last_subscribed_version", versionName).apply()
+                }
+            }
+
         window.decorView.layoutDirection = View.LAYOUT_DIRECTION_LTR
         WindowCompat.setDecorFitsSystemWindows(window, false)
 
@@ -427,22 +505,115 @@ class MainActivity : ComponentActivity() {
                 }
         }
 
+        lifecycleScope.launch {
+            dataStore.data
+                .map { (try { it[com.darkxvenom.airbeats.constants.AiRecommendationsKey] } catch (e: Exception) { null }) ?: false }
+                .distinctUntilChanged()
+                .collectLatest { enabled ->
+                    val workManager = androidx.work.WorkManager.getInstance(this@MainActivity)
+                    if (enabled) {
+                        val request = androidx.work.PeriodicWorkRequestBuilder<com.darkxvenom.airbeats.ai.AiRecommendationWorker>(1, java.util.concurrent.TimeUnit.DAYS)
+                            .setConstraints(
+                                androidx.work.Constraints.Builder()
+                                    .setRequiredNetworkType(androidx.work.NetworkType.CONNECTED)
+                                    .build()
+                            )
+                            .build()
+                        workManager.enqueueUniquePeriodicWork(
+                            "AiRecommendationWorker",
+                            androidx.work.ExistingPeriodicWorkPolicy.KEEP,
+                            request
+                        )
+                    } else {
+                        workManager.cancelUniqueWork("AiRecommendationWorker")
+                    }
+                }
+        }
 
         setContent {
+            var updateInfoState by remember { mutableStateOf<UpdateInfo?>(null) }
+            
             LaunchedEffect(Unit) {
-                if (System.currentTimeMillis() - Updater.lastCheckTime > 1.days.inWholeMilliseconds) {
-                    Updater.getLatestVersionName().onSuccess {
-                        latestVersionName = it
+                Updater.getLatestUpdateInfo().onSuccess { info ->
+                    latestVersionName = info.versionName
+                    if (info.versionName.isNotBlank() && com.darkxvenom.airbeats.utils.VersionUtils.isVersionGreater(info.versionName, BuildConfig.VERSION_NAME)) {
+                        updateInfoState = info
                     }
                 }
             }
 
             val isNameSet by namePreferenceManager.isNameSet.collectAsState(initial = null)
             var showSplash by remember { mutableStateOf(true) }
+            var splashStatusText by remember { mutableStateOf<String?>(null) }
+            var hasCheckedCloudRestore by androidx.compose.runtime.saveable.rememberSaveable { mutableStateOf(false) }
+
+            fun triggerStorageCheckAndRestore() {
+                splashStatusText = "Checking Documents/AirBeats..."
+                lifecycleScope.launch(Dispatchers.IO) {
+                    val storageFile = AutoBackupManager.findStorageBackupFile(this@MainActivity)
+                    if (storageFile != null && storageFile.exists() && storageFile.length() > 0L) {
+                        AutoBackupManager.markInitialStorageRestoreCheckComplete(this@MainActivity)
+                        withContext(Dispatchers.Main) {
+                            splashStatusText = "Restoring backup from storage..."
+                            showSplash = true
+                        }
+                        val restored = AutoBackupManager.restoreFromStorageBackup(this@MainActivity, shouldRestart = true)
+                        if (!restored) {
+                            withContext(Dispatchers.Main) {
+                                splashStatusText = null
+                                showSplash = false
+                            }
+                        }
+                    } else {
+                        // Fall back to cloud check
+                        if (!hasCheckedCloudRestore) {
+                            hasCheckedCloudRestore = true
+                            withContext(Dispatchers.Main) {
+                                splashStatusText = "Checking for cloud backup..."
+                            }
+                            val cloudRestored = AutoBackupManager.checkAndRestoreDeviceCloudBackup(this@MainActivity)
+                            withContext(Dispatchers.Main) {
+                                if (!cloudRestored) {
+                                    AutoBackupManager.markInitialStorageRestoreCheckComplete(this@MainActivity)
+                                    splashStatusText = null
+                                    delay(400)
+                                    showSplash = false
+                                }
+                            }
+                        } else {
+                            withContext(Dispatchers.Main) {
+                                AutoBackupManager.markInitialStorageRestoreCheckComplete(this@MainActivity)
+                                splashStatusText = null
+                                delay(400)
+                                showSplash = false
+                            }
+                        }
+                    }
+                }
+            }
+
+            LaunchedEffect(Unit) {
+                if (!AutoBackupManager.hasCompletedInitialStorageRestoreCheck(this@MainActivity)) {
+                    triggerStorageCheckAndRestore()
+                } else {
+                    AutoBackupManager.resetRestartAttempts(this@MainActivity)
+                    delay(1200)
+                    showSplash = false
+                }
+            }
 
             LaunchedEffect(isNameSet) {
-                if (isNameSet != null) {
-                    delay(1500)
+                if (isNameSet != null && AutoBackupManager.hasCompletedInitialStorageRestoreCheck(this@MainActivity)) {
+                    delay(1200)
+                    showSplash = false
+                }
+            }
+
+            // Fail-safe watchdog: ensure splash screen never hangs permanently
+            LaunchedEffect(Unit) {
+                delay(4000)
+                if (showSplash) {
+                    timber.log.Timber.w("Splash screen safety watchdog triggered: auto-dismissing splash")
                     showSplash = false
                 }
             }
@@ -454,33 +625,27 @@ class MainActivity : ComponentActivity() {
             val backupViewModel = com.darkxvenom.airbeats.ui.utils.safeHiltViewModel<com.darkxvenom.airbeats.viewmodels.BackupRestoreViewModel>()
             val context = androidx.compose.ui.platform.LocalContext.current
             val userName by namePreferenceManager.userName.collectAsState(initial = "AirBeats User")
-            
-            LaunchedEffect(effectiveEmail, userName) {
-                val automaticCloudBackupEnabled = context
-                    .getSharedPreferences("backup_settings", android.content.Context.MODE_PRIVATE)
-                    .getBoolean("enable_cloud_upload", true)
-
-                if (automaticCloudBackupEnabled && effectiveEmail.isNotBlank() && backupViewModel != null) {
-                    val now = System.currentTimeMillis()
-                    kotlinx.coroutines.withContext(kotlinx.coroutines.Dispatchers.IO) {
-                        val result = backupViewModel.backupToDrive(context, effectiveEmail, userName)
-                        if (result is com.darkxvenom.airbeats.utils.DriveResult.Success) {
-                            setLastBackupTimestamp(now)
-                        }
-                    }
-                }
-            }
-
             var showFullscreenLyrics by remember { mutableStateOf(false) }
 
             val playerScreenStyle by rememberEnumPreference<PlayerScreenStyle>(PlayerScreenStyleKey, defaultValue = PlayerScreenStyle.IOS_STYLED)
             val homeScreenStyle by rememberEnumPreference(HomeScreenStyleKey, defaultValue = HomeScreenStyle.CLASSIC)
             val navBarStyle by rememberEnumPreference(NavBarStyleKey, defaultValue = NavBarStyle.APPLE)
             val enableNewLyricsScreen by rememberPreference(com.darkxvenom.airbeats.constants.EnableNewLyricsScreenKey, defaultValue = true)
+            val lyricsScreenStyle by rememberEnumPreference(com.darkxvenom.airbeats.constants.LyricsScreenStyleKey, defaultValue = com.darkxvenom.airbeats.constants.LyricsScreenStyle.LYRICS_2)
 
             val enableDynamicTheme by rememberPreference(DynamicThemeKey, defaultValue = true)
+            val themeAccentColor by rememberPreference(com.darkxvenom.airbeats.constants.ThemeAccentColorKey, defaultValue = 0xFF4285F4.toInt())
+            val themeColorEffectKey by rememberPreference(com.darkxvenom.airbeats.constants.ThemeColorEffectKey, defaultValue = com.darkxvenom.airbeats.constants.ThemeColorEffect.NONE.name)
+            val themeColorEffect = remember(themeColorEffectKey) {
+                try {
+                    com.darkxvenom.airbeats.constants.ThemeColorEffect.valueOf(themeColorEffectKey)
+                } catch (e: Exception) {
+                    com.darkxvenom.airbeats.constants.ThemeColorEffect.NONE
+                }
+            }
             val darkTheme by rememberEnumPreference(DarkModeKey, defaultValue = DarkMode.AUTO)
             val enableLiquidGlass by rememberPreference(LiquidGlassKey, defaultValue = false)
+            val frostedGlassCardsButtons by rememberPreference(FrostedGlassCardsButtonsKey, defaultValue = true)
 
             val pureBlack by rememberPreference(PureBlackKey, defaultValue = false)
             val appFontKey by rememberPreference(AppFontKey, defaultValue = AppFont.LINOTTE.key)
@@ -488,10 +653,10 @@ class MainActivity : ComponentActivity() {
             val isPlayful = homeScreenStyle == HomeScreenStyle.PLAYFUL
             val isSystemInDarkTheme = isSystemInDarkTheme()
             val useDarkTheme =
-                remember(darkTheme, isSystemInDarkTheme, enableLiquidGlass, isPlayful) {
+                remember(darkTheme, isSystemInDarkTheme, enableLiquidGlass, frostedGlassCardsButtons, isPlayful) {
                     if (isPlayful) {
                         false
-                    } else if (enableLiquidGlass) {
+                    } else if (enableLiquidGlass || frostedGlassCardsButtons) {
                         true
                     } else {
                         if (darkTheme == DarkMode.AUTO) isSystemInDarkTheme else darkTheme == DarkMode.ON
@@ -500,18 +665,26 @@ class MainActivity : ComponentActivity() {
             LaunchedEffect(useDarkTheme) {
                 setSystemBarAppearance(useDarkTheme)
             }
-            var themeColor by rememberSaveable(stateSaver = ColorSaver) {
+            val (isVoiceAssistantEnabled) = rememberPreference(com.darkxvenom.airbeats.constants.EnableVoiceAssistantKey, defaultValue = false)
+            LaunchedEffect(isVoiceAssistantEnabled) {
+                if (isVoiceAssistantEnabled) {
+                    com.darkxvenom.airbeats.voice.VoiceAssistantService.start(this@MainActivity)
+                } else {
+                    com.darkxvenom.airbeats.voice.VoiceAssistantService.stop(this@MainActivity)
+                }
+            }
+            var dynamicColor by rememberSaveable(stateSaver = ColorSaver) {
                 mutableStateOf(DefaultThemeColor)
             }
 
             LaunchedEffect(playerConnection, enableDynamicTheme, isSystemInDarkTheme) {
                 val playerConnection = playerConnection
                 if (!enableDynamicTheme || playerConnection == null) {
-                    themeColor = DefaultThemeColor
+                    dynamicColor = DefaultThemeColor
                     return@LaunchedEffect
                 }
                 playerConnection.service.currentMediaMetadata.collectLatest { song ->
-                    themeColor =
+                    dynamicColor =
                         if (song != null) {
                             withContext(Dispatchers.IO) {
                                 val result =
@@ -531,11 +704,15 @@ class MainActivity : ComponentActivity() {
                 }
             }
 
+            val effectiveThemeColor = if (enableDynamicTheme) dynamicColor else Color(themeAccentColor)
+
             AirBeatsTheme(
                 darkTheme = useDarkTheme,
-                pureBlack = pureBlack && !enableLiquidGlass && !isPlayful,
+                pureBlack = pureBlack && !enableLiquidGlass && !frostedGlassCardsButtons && !isPlayful,
                 appFont = appFont,
-                themeColor = themeColor,
+                themeColor = effectiveThemeColor,
+                colorEffect = themeColorEffect,
+                enableDynamicTheme = enableDynamicTheme,
             ) {
                 val rankPrefMgr = remember { RankPreferenceManager(this@MainActivity) }
                 val lastSeenRank by rankPrefMgr.lastSeenRank.collectAsState(initial = null)
@@ -568,7 +745,7 @@ class MainActivity : ComponentActivity() {
                 val backdrop = rememberBackdrop()
 
                 if (showSplash) {
-                    HeadphoneSplashScreen()
+                    HeadphoneSplashScreen(statusText = splashStatusText)
                 } else {
 
                     NameProvider(
@@ -592,16 +769,20 @@ class MainActivity : ComponentActivity() {
                             val (previousTab) = rememberSaveable { mutableStateOf("home") }
 
                             val navigationItems = remember(homeScreenStyle, navBarStyle, enableLiquidGlass) { 
-                                when (navBarStyle) {
-                                    NavBarStyle.CLASSIC -> listOf(Screens.Home, Screens.Explore, Screens.Library)
-                                    NavBarStyle.LIQUID_GLASS -> listOf(Screens.Home, Screens.Explore, Screens.Library)
-                                    NavBarStyle.SPOTIFY -> listOf(Screens.Home, Screens.Search, Screens.Explore, Screens.Library)
-                                    NavBarStyle.APPLE -> listOf(Screens.Home, Screens.Stats, Screens.Explore, Screens.Library, Screens.Search)
-                                    NavBarStyle.NEW_CLASSIC -> listOf(Screens.Home, Screens.Search, Screens.Explore, Screens.Library)
-                                    else -> listOf(Screens.Home, Screens.Explore, Screens.Library)
+                                if (navBarStyle == NavBarStyle.LIQUID_GLASS || enableLiquidGlass) {
+                                    listOf(Screens.Home, Screens.Search, Screens.Explore, Screens.Library)
+                                } else {
+                                    when (navBarStyle) {
+                                        NavBarStyle.LIQUID_GLASS -> listOf(Screens.Home, Screens.Search, Screens.Explore, Screens.Library)
+                                        NavBarStyle.SPOTIFY -> listOf(Screens.Home, Screens.Search, Screens.Explore, Screens.Library)
+                                        NavBarStyle.APPLE -> listOf(Screens.Home, Screens.Stats, Screens.Explore, Screens.Library, Screens.Search)
+                                        NavBarStyle.NEW_CLASSIC -> listOf(Screens.Home, Screens.Search, Screens.Explore, Screens.Library)
+                                        NavBarStyle.MATERIAL -> listOf(Screens.Home, Screens.Explore, Screens.Library, Screens.Search)
+                                    }
                                 }
                             }
                             val (slimNav) = rememberPreference(SlimNavBarKey, defaultValue = false)
+                            val (reduceAnimations) = rememberPreference(ReduceAnimationsKey, defaultValue = false)
                             val defaultOpenTab by rememberEnumPreference(
                                 DefaultOpenTabKey,
                                 defaultValue = NavigationTab.HOME,
@@ -620,6 +801,8 @@ class MainActivity : ComponentActivity() {
                                     Screens.Home.route,
                                     Screens.Explore.route,
                                     Screens.Library.route,
+                                    Screens.Search.route,
+                                    Screens.Stats.route,
                                     "settings",
                                 )
 
@@ -678,7 +861,7 @@ class MainActivity : ComponentActivity() {
 
                             val navigationBarHeight by animateDpAsState(
                                 targetValue = if (shouldShowNavigationBar) NavigationBarHeight else 0.dp,
-                                animationSpec = NavigationBarAnimationSpec,
+                                animationSpec = if (reduceAnimations) snap() else NavigationBarAnimationSpec,
                                 label = "",
                             )
 
@@ -830,7 +1013,7 @@ class MainActivity : ComponentActivity() {
                                         val uri = intent.data ?: intent.extras?.getString(Intent.EXTRA_TEXT)
                                             ?.toUri() ?: return@Consumer
                                         
-                                        if (uri.host == "listentogether.airbeats.app") {
+                                        if (com.darkxvenom.airbeats.utils.RemoteConfigManager.isMatchingListenTogetherDomain(uri.host)) {
                                             val code = uri.getQueryParameter("code")
                                             if (code != null) {
                                                 ListenTogetherSync.joinSession(code)
@@ -876,8 +1059,8 @@ class MainActivity : ComponentActivity() {
                                                 when {
                                                     path == "watch" -> uri.getQueryParameter("v")
                                                     uri.host == "youtu.be" -> path
-                                                    uri.host == "play.airbeats.app" && path == "song" -> uri.getQueryParameter("id")
-                                                    uri.host == "play.airbeats.app" -> path
+                                                    com.darkxvenom.airbeats.utils.RemoteConfigManager.isMatchingPlayDomain(uri.host) && path == "song" -> uri.getQueryParameter("id")
+                                                    com.darkxvenom.airbeats.utils.RemoteConfigManager.isMatchingPlayDomain(uri.host) -> path
                                                     else -> null
                                                 }?.let { videoId ->
                                                     coroutineScope.launch {
@@ -920,6 +1103,7 @@ class MainActivity : ComponentActivity() {
                             }
                             val baseBg = if (pureBlack) Color.Black else MaterialTheme.colorScheme.surfaceContainer
                             val insetBg = if (playerBottomSheetState.progress > 0f) Color.Transparent else baseBg
+                            val ringtoneViewModel: RingtoneViewModel = viewModel()
 
                             CompositionLocalProvider(
                                 LocalDatabase provides database,
@@ -930,6 +1114,7 @@ class MainActivity : ComponentActivity() {
                                 LocalShimmerTheme provides ShimmerTheme,
                                 LocalSyncUtils provides syncUtils,
                                 LocalBackdrop provides backdrop,
+                                LocalRingtoneViewModel provides ringtoneViewModel,
                             ) {
                                 var showRealNavBar by remember { mutableStateOf(false) }
                                 var playIntroAnimation by remember { mutableStateOf(true) }
@@ -1233,7 +1418,7 @@ class MainActivity : ComponentActivity() {
                                                             },
                                                             modifier = Modifier.fillMaxSize()
                                                         )
-                                                    } else if (enableNewLyricsScreen && playerScreenStyle != PlayerScreenStyle.GALAXY) {
+                                                    } else if (lyricsScreenStyle == com.darkxvenom.airbeats.constants.LyricsScreenStyle.LYRICS_2 && playerScreenStyle != PlayerScreenStyle.GALAXY) {
                                                         com.darkxvenom.airbeats.ui.player.AirBeatsLyricsScreen(
                                                             mediaMetadata = mediaMetadata!!,
                                                             navController = navController,
@@ -1276,15 +1461,15 @@ class MainActivity : ComponentActivity() {
                                                 Box(
                                                     modifier = Modifier
                                                         .align(Alignment.BottomCenter)
-                                                        .then(if (navBarStyle != NavBarStyle.SPOTIFY && navBarStyle != NavBarStyle.NEON) Modifier.navigationBarsPadding() else Modifier)
+                                                        .then(if (navBarStyle != NavBarStyle.SPOTIFY) Modifier.navigationBarsPadding() else Modifier)
                                                         .then(
-                                                            if (navBarStyle == NavBarStyle.SPOTIFY || navBarStyle == NavBarStyle.NEON) {
+                                                            if (navBarStyle == NavBarStyle.SPOTIFY) {
                                                                 Modifier.fillMaxWidth()
                                                                     .height(NavigationBarHeight - 16.dp + bottomInset)
                                                             } else {
                                                                 Modifier
                                                                     .padding(bottom = 6.dp)
-                                                                    .fillMaxWidth(0.88f)
+                                                                    .fillMaxWidth(if (navBarStyle == NavBarStyle.MATERIAL) 0.94f else 0.88f)
                                                                     .height(NavigationBarHeight - 16.dp)
                                                             }
                                                         ),
@@ -1341,40 +1526,42 @@ class MainActivity : ComponentActivity() {
                                                     var navigateToExplore by remember { mutableStateOf(false) }
 
                                                     val onItemSelectedAction: (Int) -> Unit = { index ->
-                                                         val screen = navigationItems[index]
-                                                         val isSelected = index == selectedIndex
+                                                         if (index in navigationItems.indices) {
+                                                             val screen = navigationItems[index]
+                                                             val isSelected = screen.route == navBackStackEntry?.destination?.route
 
-                                                         val currentTapTime = System.currentTimeMillis()
-                                                         val timeSinceLastTap = currentTapTime - lastTapTime
-                                                         val isDoubleTap =
-                                                             screen.titleId == R.string.explore &&
-                                                                     lastTappedIcon == R.string.explore &&
-                                                                     timeSinceLastTap < 300L
+                                                             val currentTapTime = System.currentTimeMillis()
+                                                             val timeSinceLastTap = currentTapTime - lastTapTime
+                                                             val isDoubleTap =
+                                                                 screen.titleId == R.string.explore &&
+                                                                         lastTappedIcon == R.string.explore &&
+                                                                         timeSinceLastTap < 300L
 
-                                                         lastTapTime = currentTapTime
-                                                         lastTappedIcon = screen.titleId
+                                                             lastTapTime = currentTapTime
+                                                             lastTappedIcon = screen.titleId
 
-                                                         if (screen.titleId == R.string.explore) {
-                                                             if (isDoubleTap) {
-                                                                 onActiveChange(true)
-                                                                 navigateToExplore = false
-                                                             } else {
-                                                                 navigateToExplore = true
-                                                                 coroutineScope.launch {
-                                                                     delay(300L)
-                                                                     if (navigateToExplore) {
-                                                                         navigateToScreen(navController, screen)
+                                                             if (screen.titleId == R.string.explore && navBarStyle != NavBarStyle.MATERIAL) {
+                                                                 if (isDoubleTap) {
+                                                                     onActiveChange(true)
+                                                                     navigateToExplore = false
+                                                                 } else {
+                                                                     navigateToExplore = true
+                                                                     coroutineScope.launch {
+                                                                         delay(300L)
+                                                                         if (navigateToExplore) {
+                                                                             navigateToScreen(navController, screen)
+                                                                         }
                                                                      }
                                                                  }
-                                                             }
-                                                         } else {
-                                                             if (isSelected) {
-                                                                 navController.currentBackStackEntry?.savedStateHandle?.set("scrollToTop", true)
-                                                                 coroutineScope.launch {
-                                                                     searchBarScrollBehavior.state.resetHeightOffset()
-                                                                 }
                                                              } else {
-                                                                 navigateToScreen(navController, screen)
+                                                                 if (isSelected) {
+                                                                     navController.currentBackStackEntry?.savedStateHandle?.set("scrollToTop", true)
+                                                                     coroutineScope.launch {
+                                                                         searchBarScrollBehavior.state.resetHeightOffset()
+                                                                     }
+                                                                 } else {
+                                                                     navigateToScreen(navController, screen)
+                                                                 }
                                                              }
                                                          }
                                                      }
@@ -1385,17 +1572,6 @@ class MainActivity : ComponentActivity() {
                                                              selectedIndex = selectedIndex,
                                                              onItemSelected = onItemSelectedAction,
                                                              onNavigateRoute = { route -> navController.navigate(route) },
-                                                             modifier = Modifier
-                                                                 .fillMaxSize()
-                                                                 .offset(y = offsetY)
-                                                                 .scale(scale)
-                                                                 .alpha(alpha)
-                                                         )
-                                                     } else if (navBarStyle == NavBarStyle.NEON) {
-                                                         com.darkxvenom.airbeats.ui.component.NeonBottomNavigationBar(
-                                                             items = curvedItems,
-                                                             selectedIndex = selectedIndex,
-                                                             onItemSelected = onItemSelectedAction,
                                                              modifier = Modifier
                                                                  .fillMaxSize()
                                                                  .offset(y = offsetY)
@@ -1425,6 +1601,17 @@ class MainActivity : ComponentActivity() {
                                                                  .scale(scale)
                                                                  .alpha(alpha)
                                                          )
+                                                     } else if (navBarStyle == NavBarStyle.MATERIAL) {
+                                                         com.darkxvenom.airbeats.ui.component.MaterialBottomNavigationBar(
+                                                             items = curvedItems,
+                                                             selectedIndex = selectedIndex,
+                                                             onItemSelected = onItemSelectedAction,
+                                                             modifier = Modifier
+                                                                 .fillMaxSize()
+                                                                 .offset(y = offsetY)
+                                                                 .scale(scale)
+                                                                 .alpha(alpha)
+                                                         )
                                                      } else if (navBarStyle == NavBarStyle.LIQUID_GLASS || enableLiquidGlass) {
                                                          LiquidGlassBottomNavigationBar(
                                                              items = curvedItems,
@@ -1437,7 +1624,8 @@ class MainActivity : ComponentActivity() {
                                                                  .alpha(alpha)
                                                          )
                                                      } else {
-                                                         CurvedBottomNavigationBar(
+                                                          com.darkxvenom.airbeats.ui.component.NewClassicBottomNavigationBar(
+                                                              onNavigateRoute = { route -> navController.navigate(route) },
                                                              items = curvedItems,
                                                              selectedIndex = selectedIndex,
                                                              onItemSelected = onItemSelectedAction,
@@ -1483,6 +1671,33 @@ class MainActivity : ComponentActivity() {
                                         }
                                     }
 
+                                    val enableSwipeBackGesture by rememberPreference(com.darkxvenom.airbeats.constants.EnableSwipeBackGestureKey, defaultValue = true)
+                                    val enableTabSwipeGesture by rememberPreference(com.darkxvenom.airbeats.constants.EnableTabSwipeGestureKey, defaultValue = true)
+                                    val currentDestRoute = navBackStackEntry?.destination?.route
+                                    val rootTabRoutes = remember(navigationItems) { navigationItems.map { it.route }.toSet() }
+                                    val isRootScreen = currentDestRoute in rootTabRoutes
+                                    val canSwipeBack = !isRootScreen && navController.previousBackStackEntry != null
+
+                                    SwipeBackContainer(
+                                        enabled = enableSwipeBackGesture,
+                                        canSwipeBack = canSwipeBack,
+                                        onBack = { navController.popBackStack() },
+                                        modifier = Modifier
+                                            .fillMaxSize()
+                                            .tabSwipeGesture(
+                                                enabled = enableTabSwipeGesture && isRootScreen,
+                                                currentRoute = currentDestRoute,
+                                                navigationItems = navigationItems,
+                                                onNavigateToRoute = { targetRoute: String ->
+                                                    val screen = navigationItems.firstOrNull { it.route == targetRoute }
+                                                    if (screen != null) {
+                                                        navigateToScreen(navController, screen)
+                                                    } else {
+                                                        navController.navigate(targetRoute)
+                                                    }
+                                                }
+                                            )
+                                    ) {
                                     NavHost(
                                         navController = navController,
                                         startDestination = if (isNameSet == false) "onboarding" else when (tabOpenedFromShortcut ?: defaultOpenTab) {
@@ -1492,60 +1707,86 @@ class MainActivity : ComponentActivity() {
                                         }.route,
 
                                         enterTransition = {
-                                            if (initialState.destination.route in topLevelScreens &&
-                                                targetState.destination.route in topLevelScreens
-                                            ) {
-                                                fadeIn(spring(dampingRatio = Spring.DampingRatioNoBouncy))
+                                            if (reduceAnimations) {
+                                                fadeIn(tween(0))
                                             } else {
-                                                fadeIn(spring(dampingRatio = Spring.DampingRatioMediumBouncy)) +
-                                                        slideInHorizontally(
-                                                            initialOffsetX = { it },
-                                                            animationSpec = spring(stiffness = Spring.StiffnessLow)
-                                                        )
+                                                val fromIdx = navigationItems.indexOfFirst { it.route == initialState.destination.route }
+                                                val toIdx = navigationItems.indexOfFirst { it.route == targetState.destination.route }
+                                                if (fromIdx != -1 && toIdx != -1) {
+                                                    if (toIdx > fromIdx) {
+                                                        slideInHorizontally(tween(300, easing = FastOutSlowInEasing)) { it } + fadeIn(tween(150))
+                                                    } else {
+                                                        slideInHorizontally(tween(300, easing = FastOutSlowInEasing)) { -it } + fadeIn(tween(150))
+                                                    }
+                                                } else {
+                                                    fadeIn(tween(250)) + slideInHorizontally(
+                                                        animationSpec = tween(300, easing = FastOutSlowInEasing),
+                                                        initialOffsetX = { it / 2 }
+                                                    )
+                                                }
                                             }
                                         },
 
                                         exitTransition = {
-                                            if (initialState.destination.route in topLevelScreens &&
-                                                targetState.destination.route in topLevelScreens
-                                            ) {
-                                                fadeOut(spring(dampingRatio = Spring.DampingRatioNoBouncy))
+                                            if (reduceAnimations) {
+                                                fadeOut(tween(0))
                                             } else {
-                                                fadeOut(spring(dampingRatio = Spring.DampingRatioLowBouncy)) +
-                                                        slideOutHorizontally(
-                                                            targetOffsetX = { -it / 5 },
-                                                            animationSpec = spring(stiffness = Spring.StiffnessMediumLow)
-                                                        )
+                                                val fromIdx = navigationItems.indexOfFirst { it.route == initialState.destination.route }
+                                                val toIdx = navigationItems.indexOfFirst { it.route == targetState.destination.route }
+                                                if (fromIdx != -1 && toIdx != -1) {
+                                                    if (toIdx > fromIdx) {
+                                                        slideOutHorizontally(tween(300, easing = FastOutSlowInEasing)) { -it } + fadeOut(tween(150))
+                                                    } else {
+                                                        slideOutHorizontally(tween(300, easing = FastOutSlowInEasing)) { it } + fadeOut(tween(150))
+                                                    }
+                                                } else {
+                                                    fadeOut(tween(200)) + slideOutHorizontally(
+                                                        animationSpec = tween(300, easing = FastOutSlowInEasing),
+                                                        targetOffsetX = { -it / 2 }
+                                                    )
+                                                }
                                             }
                                         },
 
                                         popEnterTransition = {
-                                            if ((initialState.destination.route in topLevelScreens ||
-                                                        initialState.destination.route?.startsWith("search/") == true) &&
-                                                targetState.destination.route in topLevelScreens
-                                            ) {
-                                                fadeIn(spring(dampingRatio = Spring.DampingRatioNoBouncy))
+                                            if (reduceAnimations) {
+                                                fadeIn(tween(0))
                                             } else {
-                                                fadeIn(spring(dampingRatio = Spring.DampingRatioMediumBouncy)) +
-                                                        slideInHorizontally(
-                                                            initialOffsetX = { -it },
-                                                            animationSpec = spring(stiffness = Spring.StiffnessLow)
-                                                        )
+                                                val fromIdx = navigationItems.indexOfFirst { it.route == initialState.destination.route }
+                                                val toIdx = navigationItems.indexOfFirst { it.route == targetState.destination.route }
+                                                if (fromIdx != -1 && toIdx != -1) {
+                                                    if (toIdx > fromIdx) {
+                                                        slideInHorizontally(tween(300, easing = FastOutSlowInEasing)) { it } + fadeIn(tween(150))
+                                                    } else {
+                                                        slideInHorizontally(tween(300, easing = FastOutSlowInEasing)) { -it } + fadeIn(tween(150))
+                                                    }
+                                                } else {
+                                                    fadeIn(tween(250)) + slideInHorizontally(
+                                                        animationSpec = tween(300, easing = FastOutSlowInEasing),
+                                                        initialOffsetX = { -it / 3 }
+                                                    )
+                                                }
                                             }
                                         },
 
                                         popExitTransition = {
-                                            if ((initialState.destination.route in topLevelScreens ||
-                                                        initialState.destination.route?.startsWith("search/") == true) &&
-                                                targetState.destination.route in topLevelScreens
-                                            ) {
-                                                fadeOut(spring(dampingRatio = Spring.DampingRatioNoBouncy))
+                                            if (reduceAnimations) {
+                                                fadeOut(tween(0))
                                             } else {
-                                                fadeOut(spring(dampingRatio = Spring.DampingRatioLowBouncy)) +
-                                                        slideOutHorizontally(
-                                                            targetOffsetX = { it },
-                                                            animationSpec = spring(stiffness = Spring.StiffnessMediumLow)
-                                                        )
+                                                val fromIdx = navigationItems.indexOfFirst { it.route == initialState.destination.route }
+                                                val toIdx = navigationItems.indexOfFirst { it.route == targetState.destination.route }
+                                                if (fromIdx != -1 && toIdx != -1) {
+                                                    if (toIdx > fromIdx) {
+                                                        slideOutHorizontally(tween(300, easing = FastOutSlowInEasing)) { -it } + fadeOut(tween(150))
+                                                    } else {
+                                                        slideOutHorizontally(tween(300, easing = FastOutSlowInEasing)) { it } + fadeOut(tween(150))
+                                                    }
+                                                } else {
+                                                    fadeOut(tween(200)) + slideOutHorizontally(
+                                                        animationSpec = tween(300, easing = FastOutSlowInEasing),
+                                                        targetOffsetX = { it }
+                                                    )
+                                                }
                                             }
                                         },
 
@@ -1568,6 +1809,7 @@ class MainActivity : ComponentActivity() {
                                             playerBottomSheetState = playerBottomSheetState,
                                             onSearchClick = { onActiveChange(true) }
                                         )
+                                    }
                                     }
                                     }
                                 }
@@ -1602,6 +1844,89 @@ class MainActivity : ComponentActivity() {
                                         }
                                     }
                                 }
+
+                                val currentRoute = navBackStackEntry?.destination?.route
+                                val isOnboardingOrAuth = isNameSet != true ||
+                                    currentRoute == null ||
+                                    currentRoute == "onboarding" ||
+                                    currentRoute == "guest_profile_setup" ||
+                                    currentRoute == "discord_login"
+
+                                var hasSettledOnMainScreen by rememberSaveable { mutableStateOf(false) }
+                                LaunchedEffect(isOnboardingOrAuth) {
+                                    if (!isOnboardingOrAuth) {
+                                        delay(600)
+                                        hasSettledOnMainScreen = true
+                                    } else {
+                                        hasSettledOnMainScreen = false
+                                    }
+                                }
+
+                                var showNoInternetDialog by rememberSaveable { mutableStateOf(false) }
+                                var hasCheckedInternetOnOpen by rememberSaveable { mutableStateOf(false) }
+
+                                LaunchedEffect(hasSettledOnMainScreen, isOnboardingOrAuth) {
+                                    if (hasSettledOnMainScreen && !isOnboardingOrAuth && !hasCheckedInternetOnOpen) {
+                                        hasCheckedInternetOnOpen = true
+                                        delay(400)
+                                        if (!com.darkxvenom.airbeats.utils.isInternetAvailable(this@MainActivity)) {
+                                            showNoInternetDialog = true
+                                        }
+                                    }
+                                }
+
+                                if (hasSettledOnMainScreen && !isOnboardingOrAuth) {
+                                    if (showNoInternetDialog) {
+                                        com.darkxvenom.airbeats.ui.component.NoInternetDialog(
+                                            onDismiss = { showNoInternetDialog = false },
+                                            onListenCached = {
+                                                showNoInternetDialog = false
+                                                navController.navigate("cache_playlist/cached")
+                                            },
+                                            onGoToLibrary = {
+                                                showNoInternetDialog = false
+                                                navController.navigate(Screens.Library.route)
+                                            }
+                                        )
+                                    }
+
+                                    updateInfoState?.let { info ->
+                                        UpdateAvailableDialog(
+                                            updateInfo = info,
+                                            onDismiss = { updateInfoState = null }
+                                        )
+                                    }
+
+                                    com.darkxvenom.airbeats.ui.component.DeveloperNewsPopupDialog(
+                                        onNavigateToNews = {
+                                            navController.navigate("settings/developer_news")
+                                        }
+                                    )
+                                }
+
+                                val ringtoneUiState by ringtoneViewModel.uiState.collectAsState()
+
+                                RingtoneTrimmerDialog(
+                                    isVisible = ringtoneUiState.showTrimmer,
+                                    songId = ringtoneUiState.targetSongId,
+                                    songTitle = ringtoneUiState.targetSongTitle,
+                                    duration = ringtoneUiState.targetSongDuration,
+                                    onDismiss = { ringtoneViewModel.hideTrimmer() },
+                                    onResolveStreamUrl = { ringtoneViewModel.getStreamUrl(this@MainActivity, it) },
+                                    onConfirm = { start, end -> ringtoneViewModel.setAsRingtone(this@MainActivity, start, end) }
+                                )
+
+                                if (ringtoneUiState.showProgress) {
+                                    RingtoneProgressDialog(
+                                        isVisible = ringtoneUiState.showProgress,
+                                        progress = ringtoneUiState.progress,
+                                        statusMessage = ringtoneUiState.statusMessage,
+                                        isComplete = ringtoneUiState.isComplete,
+                                        isSuccess = ringtoneUiState.isSuccess,
+                                        onDismiss = { ringtoneViewModel.dismissProgress() },
+                                        onOpenSettings = { ringtoneViewModel.openRingtoneSettings(this@MainActivity) }
+                                    )
+                                }
                             }
 
                             LaunchedEffect(shouldShowSearchBar, openSearchImmediately) {
@@ -1626,8 +1951,13 @@ class MainActivity : ComponentActivity() {
         navController: NavHostController,
         screen: Screens
     ) {
+        val startDestId = try {
+            navController.graph.findStartDestination().id
+        } catch (_: Exception) {
+            navController.graph.startDestinationId
+        }
         navController.navigate(screen.route) {
-            popUpTo(navController.graph.startDestinationId) {
+            popUpTo(startDestId) {
                 saveState = true
             }
             launchSingleTop = true
@@ -1640,7 +1970,7 @@ class MainActivity : ComponentActivity() {
         when {
             uri.pathSegments.firstOrNull() == "watch" -> uri.getQueryParameter("v")
             uri.host == "youtu.be" -> uri.pathSegments.firstOrNull()
-            uri.host == "play.airbeats.app" -> {
+            com.darkxvenom.airbeats.utils.RemoteConfigManager.isMatchingPlayDomain(uri.host) -> {
                 if (uri.pathSegments.firstOrNull() == "song") {
                     uri.getQueryParameter("id")
                 } else if (uri.pathSegments.firstOrNull() == "artist") {
@@ -1693,6 +2023,7 @@ val LocalPlayerAwareWindowInsets =
     compositionLocalOf<WindowInsets> { error("No WindowInsets provided") }
 val LocalDownloadUtil = staticCompositionLocalOf<DownloadUtil> { error("No DownloadUtil provided") }
 val LocalSyncUtils = staticCompositionLocalOf<SyncUtils> { error("No SyncUtils provided") }
+val LocalRingtoneViewModel = staticCompositionLocalOf<RingtoneViewModel> { error("No RingtoneViewModel provided") }
 
 
 @Composable
@@ -1792,7 +2123,7 @@ private fun openNotificationSettings(context: Context) {
 
 suspend fun checkForUpdates(): String? = withContext(Dispatchers.IO) {
     try {
-        val url = URL("https://api.github.com/repos/d0x-dev/airbeats/releases/latest")
+        val url = URL(com.darkxvenom.airbeats.utils.RemoteConfigManager.getLatestReleaseApiUrl(isNightly = false))
         val connection = url.openConnection()
         connection.connect()
         val json = connection.getInputStream().bufferedReader().use { it.readText() }
@@ -2079,7 +2410,7 @@ fun ModernHomeTopBar(
 }
 
 @Composable
-fun HeadphoneSplashScreen() {
+fun HeadphoneSplashScreen(statusText: String? = null) {
 
     val infiniteTransition = rememberInfiniteTransition(label = "bg_anim")
 
@@ -2165,6 +2496,26 @@ fun HeadphoneSplashScreen() {
                     )
                 )
             )
+
+            if (!statusText.isNullOrBlank()) {
+                Spacer(modifier = Modifier.height(24.dp))
+                Row(
+                    verticalAlignment = Alignment.CenterVertically,
+                    horizontalArrangement = Arrangement.spacedBy(10.dp)
+                ) {
+                    CircularProgressIndicator(
+                        modifier = Modifier.size(16.dp),
+                        strokeWidth = 2.dp,
+                        color = MaterialTheme.colorScheme.primary
+                    )
+                    Text(
+                        text = statusText,
+                        fontSize = 13.sp,
+                        fontWeight = FontWeight.Medium,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.85f)
+                    )
+                }
+            }
         }
     }
 }

@@ -8,6 +8,7 @@ import com.darkxvenom.airbeats.db.entities.LyricsEntity.Companion.LYRICS_NOT_FOU
 import com.darkxvenom.airbeats.extensions.toEnum
 import com.darkxvenom.airbeats.models.MediaMetadata
 import com.darkxvenom.airbeats.utils.dataStore
+import com.darkxvenom.airbeats.utils.get
 import com.darkxvenom.airbeats.utils.reportException
 import dagger.hilt.android.qualifiers.ApplicationContext
 import kotlinx.coroutines.flow.distinctUntilChanged
@@ -15,45 +16,68 @@ import kotlinx.coroutines.flow.map
 import javax.inject.Inject
 import androidx.annotation.Keep
 
+import com.darkxvenom.airbeats.lyrics.providers.AirBeatsSimpLyricsProvider
+import com.darkxvenom.airbeats.lyrics.providers.AirBeatsUnisonLyricsProvider
+import com.darkxvenom.airbeats.lyrics.providers.AirBeatsYouLyLyricsProvider
+import com.darkxvenom.airbeats.lyrics.providers.AirBeatsMegalobizLyricsProvider
+import com.darkxvenom.airbeats.lyrics.providers.AirBeatsPaxsenixLyricsProvider
+import com.darkxvenom.airbeats.lyrics.providers.AirBeatsPortatoLyricsProvider
+
 @Keep
 class LyricsHelper
 @Inject
 constructor(
     @ApplicationContext private val context: Context,
 ) {
-    private var lyricsProviders =
+    private val allLyricsProviders =
         listOf(
             LrcLibLyricsProvider,
-            KuGouLyricsProvider,
+            AirBeatsSimpLyricsProvider,
             YouTubeSubtitleLyricsProvider,
+            KuGouLyricsProvider,
+            AirBeatsPaxsenixLyricsProvider,
+            AirBeatsUnisonLyricsProvider,
+            BetterLyricsProvider,
+            AirBeatsPortatoLyricsProvider,
+            AirBeatsYouLyLyricsProvider,
+            AirBeatsMegalobizLyricsProvider,
             YouTubeLyricsProvider
         )
+    private var lyricsProviders = allLyricsProviders
     val preferred =
         context.dataStore.data
             .map {
                 it[PreferredLyricsProviderKey].toEnum(PreferredLyricsProvider.LRCLIB)
             }.distinctUntilChanged()
-            .map {
-                lyricsProviders =
-                    if (it == PreferredLyricsProvider.LRCLIB) {
-                        listOf(
-                            LrcLibLyricsProvider,
-                            KuGouLyricsProvider,
-                            YouTubeSubtitleLyricsProvider,
-                            YouTubeLyricsProvider
-                        )
-                    } else {
-                        listOf(
-                            KuGouLyricsProvider,
-                            LrcLibLyricsProvider,
-                            YouTubeSubtitleLyricsProvider,
-                            YouTubeLyricsProvider
-                        )
-                    }
-            }
+            .map(::setPreferredProvider)
+
+    private fun setPreferredProvider(preferredProvider: PreferredLyricsProvider) {
+        val primary = when (preferredProvider) {
+                    PreferredLyricsProvider.LRCLIB -> LrcLibLyricsProvider
+                    PreferredLyricsProvider.KUGOU -> KuGouLyricsProvider
+                    PreferredLyricsProvider.SIMP_MUSIC -> AirBeatsSimpLyricsProvider
+                    PreferredLyricsProvider.YOUTUBE_SUBTITLES -> YouTubeSubtitleLyricsProvider
+                    PreferredLyricsProvider.PAXSENIX -> AirBeatsPaxsenixLyricsProvider
+                    PreferredLyricsProvider.UNISON -> AirBeatsUnisonLyricsProvider
+                    PreferredLyricsProvider.BETTER_LYRICS -> BetterLyricsProvider
+                    PreferredLyricsProvider.PORTATO -> AirBeatsPortatoLyricsProvider
+                    PreferredLyricsProvider.YOULY -> AirBeatsYouLyLyricsProvider
+                    PreferredLyricsProvider.MEGALOBIZ -> AirBeatsMegalobizLyricsProvider
+                    PreferredLyricsProvider.YOUTUBE_MUSIC -> YouTubeLyricsProvider
+        }
+        lyricsProviders = listOf(primary) + allLyricsProviders.filter { it !== primary }
+    }
+
+    private fun refreshProviderOrder() {
+        setPreferredProvider(
+            context.dataStore[PreferredLyricsProviderKey]
+                .toEnum(PreferredLyricsProvider.LRCLIB),
+        )
+    }
     private val cache = LruCache<String, List<LyricsResult>>(MAX_CACHE_SIZE)
 
     suspend fun getLyrics(mediaMetadata: MediaMetadata): String {
+        refreshProviderOrder()
         val cached = cache.get(mediaMetadata.id)?.firstOrNull()
         if (cached != null) {
             return cached.lyrics
@@ -83,6 +107,7 @@ constructor(
         duration: Int,
         callback: (LyricsResult) -> Unit,
     ) {
+        refreshProviderOrder()
         val cacheKey = "$songArtists-$songTitle".replace(" ", "")
         cache.get(cacheKey)?.let { results ->
             results.forEach {
@@ -93,10 +118,14 @@ constructor(
         val allResult = mutableListOf<LyricsResult>()
         lyricsProviders.forEach { provider ->
             if (provider.isEnabled(context)) {
-                provider.getAllLyrics(mediaId, songTitle, songArtists, duration) { lyrics ->
-                    val result = LyricsResult(provider.name, lyrics)
-                    allResult += result
-                    callback(result)
+                runCatching {
+                    provider.getAllLyrics(mediaId, songTitle, songArtists, duration) { lyrics ->
+                        val result = LyricsResult(provider.name, lyrics)
+                        allResult += result
+                        callback(result)
+                    }
+                }.onFailure {
+                    reportException(it)
                 }
             }
         }

@@ -26,10 +26,11 @@ import androidx.compose.material3.Button
 import androidx.compose.material3.ButtonDefaults
 import androidx.compose.material3.Card
 import androidx.compose.material3.CardDefaults
-import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.ExperimentalMaterial3Api
+import androidx.compose.material3.ExperimentalMaterial3ExpressiveApi
 import androidx.compose.material3.HorizontalDivider
 import androidx.compose.material3.Icon
+import androidx.compose.material3.LoadingIndicator
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.ModalBottomSheet
 import androidx.compose.material3.Surface
@@ -164,8 +165,15 @@ fun ChangelogScreen(viewModel: ChangelogViewModel = viewModel()) {
     val uiState by viewModel.uiState.collectAsState()
     var selectedTab by remember { mutableStateOf(ChangelogTab.RELEASES) }
 
-    LaunchedEffect(Unit) {
-        viewModel.loadChangelog("d0x-dev", "AirBeats")
+    val repoString = com.darkxvenom.airbeats.utils.RemoteConfigManager.githubRepo.trim()
+    val repoParts = repoString.split("/")
+    val owner = repoParts.getOrNull(0)?.trim().orEmpty()
+    val repo = repoParts.getOrNull(1)?.trim().orEmpty()
+
+    LaunchedEffect(owner, repo) {
+        if (owner.isNotBlank() && repo.isNotBlank()) {
+            viewModel.loadChangelog(owner, repo)
+        }
     }
 
     Column(
@@ -194,7 +202,11 @@ fun ChangelogScreen(viewModel: ChangelogViewModel = viewModel()) {
                     isLoading = uiState.isLoadingReleases,
                     error = uiState.releasesError,
                     lastUpdated = uiState.lastUpdated,
-                    onRetry = { viewModel.loadChangelog("d0x-dev", "AirBeats") }
+                    onRetry = {
+                        if (owner.isNotBlank() && repo.isNotBlank()) {
+                            viewModel.loadChangelog(owner, repo)
+                        }
+                    }
                 )
             }
 
@@ -204,7 +216,11 @@ fun ChangelogScreen(viewModel: ChangelogViewModel = viewModel()) {
                     isLoading = uiState.isLoadingCommits,
                     error = uiState.commitsError,
                     lastUpdated = uiState.lastUpdated,
-                    onRetry = { viewModel.loadChangelog("d0x-dev", "AirBeats") }
+                    onRetry = {
+                        if (owner.isNotBlank() && repo.isNotBlank()) {
+                            viewModel.loadChangelog(owner, repo)
+                        }
+                    }
                 )
             }
         }
@@ -268,7 +284,7 @@ private fun ReleasesContent(
     onRetry: () -> Unit
 ) {
     when {
-        isLoading -> LoadingIndicator("Loading releases...")
+        isLoading -> ChangelogLoadingContent("Loading releases...")
         error != null -> ErrorContent(error, onRetry)
         releases.isEmpty() -> EmptyContent("No releases available")
         else -> SuccessReleasesContent(releases, lastUpdated)
@@ -284,15 +300,16 @@ private fun CommitsContent(
     onRetry: () -> Unit
 ) {
     when {
-        isLoading -> LoadingIndicator("Loading commits...")
+        isLoading -> ChangelogLoadingContent("Loading commits...")
         error != null -> ErrorContent(error, onRetry)
         commits.isEmpty() -> EmptyContent("No commits available")
         else -> SuccessCommitsContent(commits, lastUpdated)
     }
 }
 
+@OptIn(ExperimentalMaterial3ExpressiveApi::class)
 @Composable
-private fun LoadingIndicator(message: String) {
+private fun ChangelogLoadingContent(message: String) {
     Card(
         modifier = Modifier.fillMaxWidth(),
         colors = CardDefaults.cardColors(
@@ -310,10 +327,7 @@ private fun LoadingIndicator(message: String) {
                 horizontalAlignment = Alignment.CenterHorizontally,
                 verticalArrangement = Arrangement.spacedBy(16.dp)
             ) {
-                CircularProgressIndicator(
-                    color = MaterialTheme.colorScheme.primary,
-                    strokeWidth = 3.dp
-                )
+                LoadingIndicator()
                 Text(
                     text = message,
                     style = MaterialTheme.typography.bodyMedium,

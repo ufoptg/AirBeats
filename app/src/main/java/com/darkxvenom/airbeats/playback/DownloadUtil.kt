@@ -14,11 +14,12 @@ import androidx.media3.exoplayer.offline.DownloadManager
 import androidx.media3.exoplayer.offline.DownloadNotificationHelper
 import com.darkxvenom.airbeats.innertube.YouTube
 import com.darkxvenom.airbeats.constants.AudioQuality
-import com.darkxvenom.airbeats.constants.AudioQualityKey
+import com.darkxvenom.airbeats.constants.DownloadQualityKey
 import com.darkxvenom.airbeats.db.MusicDatabase
 import com.darkxvenom.airbeats.db.entities.FormatEntity
 import com.darkxvenom.airbeats.di.DownloadCache
 import com.darkxvenom.airbeats.di.PlayerCache
+import com.darkxvenom.airbeats.extensions.tryOrNull
 import com.darkxvenom.airbeats.utils.YTPlayerUtils
 import com.darkxvenom.airbeats.utils.enumPreference
 import dagger.hilt.android.qualifiers.ApplicationContext
@@ -45,7 +46,7 @@ constructor(
     @PlayerCache val playerCache: SimpleCache,
 ) {
     private val connectivityManager = context.getSystemService<ConnectivityManager>()!!
-    private val audioQuality by enumPreference(context, AudioQualityKey, AudioQuality.AUTO)
+    private val downloadQuality by enumPreference(context, DownloadQualityKey, AudioQuality.HIGH)
     private val songUrlCache = HashMap<String, Pair<String, Long>>()
     private val dataSourceFactory =
         ResolvingDataSource.Factory(
@@ -72,11 +73,21 @@ constructor(
                 return@Factory dataSpec.withUri(it.first.toUri())
             }
 
+            if (mediaId.startsWith("JS:")) {
+                val streamUrl = runBlocking(Dispatchers.IO) {
+                    com.darkxvenom.airbeats.jiosaavn.JioSaavnApi.getStreamUrl(mediaId)
+                }
+                if (streamUrl != null) {
+                    songUrlCache[mediaId] = Pair(streamUrl, System.currentTimeMillis() + 3600000L)
+                    return@Factory dataSpec.withUri(streamUrl.toUri())
+                }
+            }
+
             val playedFormat = runBlocking(Dispatchers.IO) { database.format(mediaId).first() }
             val playbackData = runBlocking(Dispatchers.IO) {
                 YTPlayerUtils.playerResponseForPlayback(
                     mediaId,
-                    audioQuality = audioQuality,
+                    audioQuality = downloadQuality,
                     connectivityManager = connectivityManager,
                 )
             }.getOrThrow()

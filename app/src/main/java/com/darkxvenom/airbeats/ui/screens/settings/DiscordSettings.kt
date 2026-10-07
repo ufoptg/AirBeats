@@ -97,7 +97,7 @@ import com.darkxvenom.airbeats.ui.utils.backToMain
 import com.darkxvenom.airbeats.utils.makeTimeString
 import com.darkxvenom.airbeats.utils.rememberEnumPreference
 import com.darkxvenom.airbeats.utils.rememberPreference
-import com.darkxvenom.airbeats.kizzy.rpc.KizzyRPC
+import com.darkxvenom.airbeats.discordrpc.rpc.DiscordRpcClient
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.isActive
@@ -135,7 +135,7 @@ fun DiscordSettings(
         val token = discordToken
         if (token.isEmpty()) return@LaunchedEffect
         coroutineScope.launch(Dispatchers.IO) {
-            KizzyRPC.getUserInfo(token).onSuccess {
+            DiscordRpcClient.getUserInfo(token).onSuccess {
                 discordUsername = it.username
                 discordName = it.name
             }
@@ -685,7 +685,7 @@ fun EnhancedRichPresence(
                         onClick = {
                             val intent = Intent(
                                 Intent.ACTION_VIEW,
-                                "https://play.airbeats.app/song?id=${song?.id}".toUri()
+                                com.darkxvenom.airbeats.utils.RemoteConfigManager.getSongShareUrl(song?.id ?: "").toUri()
                             )
                             context.startActivity(intent)
                         },
@@ -706,11 +706,16 @@ fun EnhancedRichPresence(
                     // Botón AirBeats mejorado
                     OutlinedButton(
                         onClick = {
-                            val intent = Intent(
-                                Intent.ACTION_VIEW,
-                                "https://github.com/darkxvenom/airbeats".toUri()
-                            )
-                            context.startActivity(intent)
+                            val targetUrl = com.darkxvenom.airbeats.utils.RemoteConfigManager.websiteUrl.ifBlank {
+                                com.darkxvenom.airbeats.utils.RemoteConfigManager.getReleasesPageUrl()
+                            }
+                            if (targetUrl.isNotBlank()) {
+                                val intent = Intent(
+                                    Intent.ACTION_VIEW,
+                                    targetUrl.toUri()
+                                )
+                                context.startActivity(intent)
+                            }
                         },
                         modifier = Modifier.weight(1f),
                         border = BorderStroke(

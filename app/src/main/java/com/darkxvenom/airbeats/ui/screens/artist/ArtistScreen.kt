@@ -1017,7 +1017,7 @@ fun ArtistScreen(
                         putExtra(
                             Intent.EXTRA_TEXT,
                             viewModel.artistPage?.artist?.shareLink
-                                ?: "https://play.airbeats.app/artist?id=${viewModel.artistId}"
+                                ?: com.darkxvenom.airbeats.utils.RemoteConfigManager.getArtistShareUrl(viewModel.artistId)
                         )
                     }
                     context.startActivity(Intent.createChooser(shareIntent, null))

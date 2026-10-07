@@ -1,8 +1,13 @@
 package com.darkxvenom.airbeats.ui.player
 
+import android.Manifest
 import android.content.Context
 import android.content.Intent
+import android.content.pm.PackageManager
 import android.content.res.Configuration
+import androidx.activity.compose.rememberLauncherForActivityResult
+import androidx.activity.result.contract.ActivityResultContracts
+import androidx.core.content.ContextCompat
 import android.graphics.drawable.BitmapDrawable
 import android.media.AudioDeviceInfo
 import android.media.AudioManager
@@ -170,7 +175,6 @@ import com.darkxvenom.airbeats.constants.PlayerTextAlignmentKey
 import com.darkxvenom.airbeats.constants.PureBlackKey
 import com.darkxvenom.airbeats.constants.QueuePeekHeight
 import com.darkxvenom.airbeats.constants.ShowLyricsKey
-import com.darkxvenom.airbeats.constants.EnableNewQueueScreenKey
 import com.darkxvenom.airbeats.constants.SliderStyle
 import com.darkxvenom.airbeats.constants.SliderStyleKey
 import com.darkxvenom.airbeats.constants.SmallButtonsShapeKey
@@ -191,6 +195,8 @@ import com.darkxvenom.airbeats.ui.component.LocalBottomSheetPageState
 import com.darkxvenom.airbeats.ui.component.PlayerSliderTrack
 import com.darkxvenom.airbeats.ui.component.ResizableIconButton
 import com.darkxvenom.airbeats.ui.component.rememberBottomSheetState
+import com.darkxvenom.airbeats.ui.component.AudioPipelineDialog
+import com.darkxvenom.airbeats.ui.component.AudioQualityTag
 import com.darkxvenom.airbeats.ui.menu.PlayerMenu
 import com.darkxvenom.airbeats.ui.menu.AddToPlaylistDialog
 import com.darkxvenom.airbeats.innertube.YouTube
@@ -259,7 +265,6 @@ fun BottomSheetPlayer(
     val isSystemInDarkTheme = isSystemInDarkTheme()
     val darkTheme by rememberEnumPreference(DarkModeKey, defaultValue = DarkMode.AUTO)
     val pureBlack by rememberPreference(PureBlackKey, defaultValue = false)
-    val enableNewQueueScreen by rememberPreference(EnableNewQueueScreenKey, defaultValue = true)
     val useDarkTheme = remember(darkTheme, isSystemInDarkTheme) {
         if (darkTheme == DarkMode.AUTO) isSystemInDarkTheme else darkTheme == DarkMode.ON
     }
@@ -324,14 +329,26 @@ fun BottomSheetPlayer(
     val showLyrics by rememberPreference(ShowLyricsKey, defaultValue = false)
     val sliderStyle by rememberEnumPreference(SliderStyleKey, SliderStyle.SQUIGGLY)
 
-    var position by rememberSaveable(playbackState) {
-        mutableLongStateOf(playerConnection.player.currentPosition)
+    var position by rememberSaveable(mediaMetadata?.id) {
+        mutableLongStateOf(0L)
     }
-    var duration by rememberSaveable(playbackState) {
-        mutableLongStateOf(playerConnection.player.duration)
+    var duration by rememberSaveable(mediaMetadata?.id) {
+        val metaDur = (mediaMetadata?.duration ?: 0) * 1000L
+        mutableLongStateOf(if (metaDur > 0) metaDur else playerConnection.player.duration.coerceAtLeast(0L))
     }
     var sliderPosition by remember {
         mutableStateOf<Long?>(null)
+    }
+
+    LaunchedEffect(mediaMetadata?.id) {
+        sliderPosition = null
+        position = 0L
+        val metaDur = (mediaMetadata?.duration ?: 0) * 1000L
+        if (metaDur > 0) {
+            duration = metaDur
+        } else if (playerConnection.player.duration > 0) {
+            duration = playerConnection.player.duration
+        }
     }
 
     var gradientColors by remember {
@@ -748,20 +765,90 @@ fun BottomSheetPlayer(
             .background(textButtonColor)
     }
 
-    LaunchedEffect(playbackState) {
-        if (playbackState == STATE_READY) {
+    LaunchedEffect(playbackState, mediaMetadata?.id) {
+        if (playbackState == STATE_READY || playbackState == androidx.media3.common.Player.STATE_BUFFERING) {
             while (isActive) {
+                val currentPos = playerConnection.player.currentPosition
+                if (currentPos >= 0) {
+                    position = currentPos
+                }
+                val dur = playerConnection.player.duration
+                if (dur > 0) {
+                    duration = dur
+                } else {
+                    val metaDur = (mediaMetadata?.duration ?: 0) * 1000L
+                    if (metaDur > 0) {
+                        duration = metaDur
+                    }
+                }
                 delay(100)
-                position = playerConnection.player.currentPosition
-                duration = playerConnection.player.duration
             }
         }
     }
 
     val currentFormat by playerConnection.currentFormat.collectAsState(initial = null)
 
+    var showAudioPipelineDialog by rememberSaveable {
+        mutableStateOf(false)
+    }
+
+    if (showAudioPipelineDialog) {
+        AudioPipelineDialog(
+            currentFormat = currentFormat,
+            mediaMetadata = mediaMetadata,
+            onDismiss = { showAudioPipelineDialog = false }
+        )
+    }
+
     var showDetailsDialog by rememberSaveable {
         mutableStateOf(false)
+    }
+
+    var showDeviceSheet by rememberSaveable {
+        mutableStateOf(false)
+    }
+
+    val preferredAudioDevice by playerConnection.service.preferredAudioDevice.collectAsState()
+    val availableAudioDevices by playerConnection.service.availableAudioDevices.collectAsState()
+    val fallbackDevices = remember { getAvailableDevices(context) }
+    val displayDevices = if (availableAudioDevices.isNotEmpty()) availableAudioDevices else fallbackDevices
+    val activeDevice = preferredAudioDevice ?: remember(displayDevices) { getActiveDevice(displayDevices) }
+
+    val hasBluetoothPermission = remember(context) {
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) {
+            ContextCompat.checkSelfPermission(
+                context,
+                Manifest.permission.BLUETOOTH_CONNECT
+            ) == PackageManager.PERMISSION_GRANTED
+        } else {
+            true
+        }
+    }
+    var bluetoothPermissionGranted by remember { mutableStateOf(hasBluetoothPermission) }
+
+    val bluetoothPermissionLauncher = rememberLauncherForActivityResult(
+        ActivityResultContracts.RequestPermission()
+    ) { isGranted ->
+        bluetoothPermissionGranted = isGranted
+        playerConnection.service.refreshAudioOutputDevices()
+        showDeviceSheet = true
+    }
+
+    if (showDeviceSheet) {
+        DeviceSelectionBottomSheet(
+            onDismiss = { showDeviceSheet = false },
+            availableDevices = displayDevices,
+            activeDevice = activeDevice,
+            preferredDevice = preferredAudioDevice,
+            onSelectDevice = { device ->
+                playerConnection.service.setPreferredOutputDevice(device)
+            },
+            textBackgroundColor = MaterialTheme.colorScheme.onSurface,
+            hasBluetoothPermission = bluetoothPermissionGranted,
+            onRequestBluetoothPermission = {
+                bluetoothPermissionLauncher.launch(Manifest.permission.BLUETOOTH_CONNECT)
+            }
+        )
     }
 
     if (showDetailsDialog) {
@@ -789,7 +876,20 @@ fun BottomSheetPlayer(
                             .sizeIn(minWidth = 280.dp, maxWidth = 560.dp)
                             .verticalScroll(rememberScrollState()),
                 ) {
+                    val isJioSaavn = mediaMetadata?.id?.startsWith("JS:") == true ||
+                        currentFormat?.playbackUrl?.contains("saavn", ignoreCase = true) == true ||
+                        currentFormat?.playbackUrl?.contains("jio", ignoreCase = true) == true
+                    val isLocal = mediaMetadata?.id?.startsWith("local:") == true ||
+                        currentFormat?.playbackUrl?.startsWith("content://") == true ||
+                        currentFormat?.playbackUrl?.startsWith("file://") == true
+                    val playbackSource = when {
+                        isLocal -> "Local File"
+                        isJioSaavn -> "JioSaavn (320kbps)"
+                        else -> "YouTube Music"
+                    }
+
                     listOf(
+                        "Source" to playbackSource,
                         stringResource(R.string.song_title) to mediaMetadata?.title,
                         stringResource(R.string.song_artists) to mediaMetadata?.artists?.joinToString { it.name },
                         stringResource(R.string.media_id) to mediaMetadata?.id,
@@ -854,8 +954,11 @@ fun BottomSheetPlayer(
 
     val queueSheetState =
         rememberBottomSheetState(
-            dismissedBound = QueuePeekHeight + WindowInsets.systemBars.asPaddingValues()
-                .calculateBottomPadding(),
+            dismissedBound = if (playerScreenStyle == PlayerScreenStyle.CLASSIC) {
+                QueuePeekHeight + WindowInsets.systemBars.asPaddingValues().calculateBottomPadding()
+            } else {
+                0.dp
+            },
             expandedBound = state.expandedBound,
         )
 
@@ -869,14 +972,12 @@ fun BottomSheetPlayer(
 
     val navBarStyle by rememberEnumPreference(
         com.darkxvenom.airbeats.constants.NavBarStyleKey,
-        defaultValue = com.darkxvenom.airbeats.constants.NavBarStyle.CLASSIC
+        defaultValue = com.darkxvenom.airbeats.constants.NavBarStyle.NEW_CLASSIC
     )
-    val isNeon = navBarStyle == com.darkxvenom.airbeats.constants.NavBarStyle.NEON
-
     BottomSheet(
         state = state,
         modifier = modifier,
-        shape = if (isNeon) androidx.compose.ui.graphics.RectangleShape else RoundedCornerShape(
+        shape = RoundedCornerShape(
             topStart = if (!state.isExpanded) 16.dp else 0.dp,
             topEnd = if (!state.isExpanded) 16.dp else 0.dp
         ),
@@ -956,14 +1057,12 @@ fun BottomSheetPlayer(
             }
         },
         onDismiss = {
-            playerConnection.service.clearAutomix()
-            playerConnection.player.stop()
-            playerConnection.player.clearMediaItems()
+            playerConnection.service.stopPlayback()
         },
         collapsedContent = {
             val (navBarStyle, _) = com.darkxvenom.airbeats.utils.rememberEnumPreference<com.darkxvenom.airbeats.constants.NavBarStyle>(
                 com.darkxvenom.airbeats.constants.NavBarStyleKey,
-                defaultValue = com.darkxvenom.airbeats.constants.NavBarStyle.CLASSIC
+                defaultValue = com.darkxvenom.airbeats.constants.NavBarStyle.NEW_CLASSIC
             )
             if (navBarStyle == com.darkxvenom.airbeats.constants.NavBarStyle.NEW_CLASSIC) {
                 NewClassicMiniPlayer(
@@ -972,8 +1071,6 @@ fun BottomSheetPlayer(
                     state = state,
                     navController = navController,
                 )
-            } else if (navBarStyle == com.darkxvenom.airbeats.constants.NavBarStyle.NEON) {
-                NeonMiniPlayer(state = state)
             } else if (navBarStyle == com.darkxvenom.airbeats.constants.NavBarStyle.APPLE) {
                 AppleMiniPlayer(
                     position = position,
@@ -1427,6 +1524,13 @@ fun BottomSheetPlayer(
                     overflow = TextOverflow.Ellipsis,
                 )
 
+                AudioQualityTag(
+                    currentFormat = currentFormat,
+                    mediaMetadata = mediaMetadata,
+                    tint = TextBackgroundColor,
+                    onClick = { showAudioPipelineDialog = true }
+                )
+
                 Text(
                     text = if (duration != C.TIME_UNSET) makeTimeString(duration) else "",
                     style = MaterialTheme.typography.labelMedium,
@@ -1535,7 +1639,7 @@ fun BottomSheetPlayer(
                     modifier = Modifier.size(32.dp).padding(4.dp).scale(shuffleScale),
                     onClick = {
                         shuffleBounce++
-                        playerConnection.player.shuffleModeEnabled = !playerConnection.player.shuffleModeEnabled
+                        playerConnection.toggleShuffle()
                     }
                 )
 
@@ -1548,11 +1652,11 @@ fun BottomSheetPlayer(
 
                 ResizableIconButton(
                     icon = when (repeatMode) {
-                        Player.REPEAT_MODE_OFF, Player.REPEAT_MODE_ALL -> R.drawable.repeat
                         Player.REPEAT_MODE_ONE -> R.drawable.repeat_one
-                        else -> throw IllegalStateException()
+                        Player.REPEAT_MODE_ALL -> R.drawable.repeat_on
+                        else -> R.drawable.repeat
                     },
-                    color = TextBackgroundColor,
+                    color = if (repeatMode != Player.REPEAT_MODE_OFF) MaterialTheme.colorScheme.primary else TextBackgroundColor,
                     modifier = Modifier
                         .size(32.dp)
                         .padding(4.dp)
@@ -1560,19 +1664,23 @@ fun BottomSheetPlayer(
                         .alpha(if (repeatMode == Player.REPEAT_MODE_OFF) 0.5f else 1f),
                     onClick = {
                         repeatBounce++
-                        playerConnection.player.toggleRepeatMode()
+                        playerConnection.toggleRepeatMode()
                     },
                 )
             }
         }
         val immersiveControlsContent: @Composable ColumnScope.(MediaMetadata) -> Unit = { mediaMetadata ->
             val isLoading = playbackState != STATE_READY && playbackState != STATE_ENDED
+            val isDolbyAtmos = currentFormat?.mimeType?.let {
+                it.contains("eac3", ignoreCase = true) || it.contains("dolby", ignoreCase = true)
+            } == true
             val codecLabel = remember(currentFormat) {
                 currentFormat?.mimeType
                     ?.substringAfter("/", missingDelimiterValue = "")
                     ?.uppercase()
                     ?.let { codec ->
                         when {
+                            codec.contains("EAC3") || codec.contains("DOLBY") -> "DOLBY ATMOS"
                             codec.contains("MP4A") -> "MP4"
                             codec.contains("AAC") -> "AAC"
                             codec.contains("OPUS") -> "OPUS"
@@ -1773,29 +1881,12 @@ fun BottomSheetPlayer(
                         style = MaterialTheme.typography.labelMedium,
                         color = Color.White.copy(alpha = 0.88f),
                     )
-                    codecLabel?.let { label ->
-                        Box(
-                            modifier = Modifier
-                                .clip(RoundedCornerShape(5.dp))
-                                .background(Color.White.copy(alpha = 0.14f))
-                                .padding(horizontal = 9.dp, vertical = 4.dp)
-                        ) {
-                            Row(verticalAlignment = Alignment.CenterVertically) {
-                                Image(
-                                    painter = painterResource(R.drawable.graphic_eq),
-                                    contentDescription = null,
-                                    colorFilter = ColorFilter.tint(Color.White.copy(alpha = 0.78f)),
-                                    modifier = Modifier.size(14.dp)
-                                )
-                                Spacer(Modifier.width(4.dp))
-                                Text(
-                                    text = label,
-                                    style = MaterialTheme.typography.labelSmall,
-                                    color = Color.White.copy(alpha = 0.78f),
-                                )
-                            }
-                        }
-                    }
+                    AudioQualityTag(
+                        currentFormat = currentFormat,
+                        mediaMetadata = mediaMetadata,
+                        tint = Color.White,
+                        onClick = { showAudioPipelineDialog = true }
+                    )
                     Text(
                         text = if (duration != C.TIME_UNSET) "-${makeTimeString((duration - (sliderPosition ?: position)).coerceAtLeast(0L))}" else "",
                         style = MaterialTheme.typography.labelMedium,
@@ -1987,8 +2078,8 @@ fun BottomSheetPlayer(
                 onPlayPause = { playerConnection.player.togglePlayPause() },
                 onPrevious = { playerConnection.player.seekToPrevious() },
                 onNext = playerConnection::seekToNext,
-                onShuffle = { playerConnection.player.shuffleModeEnabled = !playerConnection.player.shuffleModeEnabled },
-                onRepeat = { playerConnection.player.toggleRepeatMode() },
+                onShuffle = { playerConnection.toggleShuffle() },
+                onRepeat = { playerConnection.toggleRepeatMode() },
                 onOpenLyrics = onOpenFullscreenLyrics,
                 onOpenQueue = queueSheetState::expandSoft,
                 onCollapse = state::collapseSoft,
@@ -2024,8 +2115,8 @@ fun BottomSheetPlayer(
                 onPlayPause = { playerConnection.player.togglePlayPause() },
                 onPrevious = { playerConnection.player.seekToPrevious() },
                 onNext = playerConnection::seekToNext,
-                onShuffle = { playerConnection.player.shuffleModeEnabled = !playerConnection.player.shuffleModeEnabled },
-                onRepeat = { playerConnection.player.toggleRepeatMode() },
+                onShuffle = { playerConnection.toggleShuffle() },
+                onRepeat = { playerConnection.toggleRepeatMode() },
                 onOpenLyrics = onOpenFullscreenLyrics,
                 onOpenQueue = queueSheetState::expandSoft,
                 onCollapse = state::collapseSoft,
@@ -2068,8 +2159,8 @@ fun BottomSheetPlayer(
                 onPlayPause = { playerConnection.player.togglePlayPause() },
                 onPrevious = { playerConnection.player.seekToPrevious() },
                 onNext = playerConnection::seekToNext,
-                onShuffle = { playerConnection.player.shuffleModeEnabled = !playerConnection.player.shuffleModeEnabled },
-                onRepeat = { playerConnection.player.toggleRepeatMode() },
+                onShuffle = { playerConnection.toggleShuffle() },
+                onRepeat = { playerConnection.toggleRepeatMode() },
                 onOpenLyrics = onOpenFullscreenLyrics,
                 onOpenQueue = queueSheetState::expandSoft,
                 onCollapse = state::collapseSoft,
@@ -2112,8 +2203,8 @@ fun BottomSheetPlayer(
                 onPlayPause = { playerConnection.player.togglePlayPause() },
                 onPrevious = { playerConnection.player.seekToPrevious() },
                 onNext = playerConnection::seekToNext,
-                onShuffle = { playerConnection.player.shuffleModeEnabled = !playerConnection.player.shuffleModeEnabled },
-                onRepeat = { playerConnection.player.toggleRepeatMode() },
+                onShuffle = { playerConnection.toggleShuffle() },
+                onRepeat = { playerConnection.toggleRepeatMode() },
                 onOpenLyrics = onOpenFullscreenLyrics,
                 onOpenQueue = queueSheetState::expandSoft,
                 onCollapse = state::collapseSoft,
@@ -2165,9 +2256,9 @@ fun BottomSheetPlayer(
                 onNext = { playerConnection.player.seekToNext() },
                 onCollapse = state::collapseSoft,
                 shuffleModeEnabled = shuffleModeEnabled,
-                onShuffleClick = { playerConnection.player.shuffleModeEnabled = !playerConnection.player.shuffleModeEnabled },
+                onShuffleClick = { playerConnection.toggleShuffle() },
                 repeatMode = repeatMode,
-                onRepeatClick = { playerConnection.player.toggleRepeatMode() },
+                onRepeatClick = { playerConnection.toggleRepeatMode() },
                 onLyricsClick = onOpenFullscreenLyrics,
                 onQueueClick = { queueSheetState.expandSoft() },
                 onMenuClick = {
@@ -2224,8 +2315,8 @@ fun BottomSheetPlayer(
                             onPlayPause = { playerConnection.player.togglePlayPause() },
                             onPrevious = { playerConnection.player.seekToPrevious() },
                             onNext = playerConnection::seekToNext,
-                            onShuffle = { playerConnection.player.shuffleModeEnabled = !playerConnection.player.shuffleModeEnabled },
-                            onRepeat = { playerConnection.player.toggleRepeatMode() },
+                            onShuffle = { playerConnection.toggleShuffle() },
+                            onRepeat = { playerConnection.toggleRepeatMode() },
                             onOpenLyrics = onOpenFullscreenLyrics,
                             onOpenQueue = queueSheetState::expandSoft,
                             onStartRadio = playerConnection.service::startRadioSeamlessly,
@@ -2306,9 +2397,9 @@ fun BottomSheetPlayer(
                 onNext = { playerConnection.player.seekToNext() },
                 onCollapse = state::collapseSoft,
                 shuffleModeEnabled = shuffleModeEnabled,
-                onShuffleClick = { playerConnection.player.shuffleModeEnabled = !playerConnection.player.shuffleModeEnabled },
+                onShuffleClick = { playerConnection.toggleShuffle() },
                 repeatMode = repeatMode,
-                onRepeatClick = { playerConnection.player.toggleRepeatMode() },
+                onRepeatClick = { playerConnection.toggleRepeatMode() },
                 onLyricsClick = onOpenFullscreenLyrics,
                 onMenuClick = {
                     menuState.show {
@@ -2358,9 +2449,9 @@ fun BottomSheetPlayer(
                 onLikeClick = playerConnection::toggleLike,
                 onAddToPlaylistClick = { showChoosePlaylistDialog = true },
                 shuffleModeEnabled = shuffleModeEnabled,
-                onShuffleClick = { playerConnection.player.shuffleModeEnabled = !playerConnection.player.shuffleModeEnabled },
+                onShuffleClick = { playerConnection.toggleShuffle() },
                 repeatMode = repeatMode,
-                onRepeatClick = { playerConnection.player.toggleRepeatMode() },
+                onRepeatClick = { playerConnection.toggleRepeatMode() },
                 onLyricsClick = onOpenFullscreenLyrics,
                 onQueueClick = { queueSheetState.expandSoft() }
             )
@@ -2400,7 +2491,7 @@ fun BottomSheetPlayer(
                 isLiked = currentSong?.song?.liked == true,
                 onLikeClick = playerConnection::toggleLike,
                 repeatMode = repeatMode,
-                onRepeatClick = { playerConnection.player.toggleRepeatMode() },
+                onRepeatClick = { playerConnection.toggleRepeatMode() },
                 onQueueClick = { queueSheetState.expandSoft() }
             )
         } else if (playerScreenStyle == PlayerScreenStyle.COLOURFULL) {
@@ -2440,7 +2531,7 @@ fun BottomSheetPlayer(
                 isLiked = currentSong?.song?.liked == true,
                 onLikeClick = playerConnection::toggleLike,
                 repeatMode = repeatMode,
-                onRepeatClick = { playerConnection.player.toggleRepeatMode() },
+                onRepeatClick = { playerConnection.toggleRepeatMode() },
                 onQueueClick = { queueSheetState.expandSoft() }
             )
         } else if (playerScreenStyle == PlayerScreenStyle.APPLE) {
@@ -2483,7 +2574,7 @@ fun BottomSheetPlayer(
                             type = "text/plain"
                             putExtra(
                                 Intent.EXTRA_TEXT,
-                                "https://play.airbeats.app/song?id=${metadata.id}"
+                                com.darkxvenom.airbeats.utils.RemoteConfigManager.getSongShareUrl(metadata.id)
                             )
                         }
                         context.startActivity(Intent.createChooser(intent, null))
@@ -2491,10 +2582,10 @@ fun BottomSheetPlayer(
                 },
                 shuffleModeEnabled = shuffleModeEnabled,
                 onShuffleClick = {
-                    playerConnection.player.shuffleModeEnabled = !playerConnection.player.shuffleModeEnabled
+                    playerConnection.toggleShuffle()
                 },
                 repeatMode = repeatMode,
-                onRepeatClick = { playerConnection.player.toggleRepeatMode() },
+                onRepeatClick = { playerConnection.toggleRepeatMode() },
                 onOpenFullscreenLyrics = onOpenFullscreenLyrics,
             )
         } else if (playerScreenStyle == PlayerScreenStyle.IOS_STYLED) {
@@ -2537,7 +2628,7 @@ fun BottomSheetPlayer(
                             type = "text/plain"
                             putExtra(
                                 Intent.EXTRA_TEXT,
-                                "https://play.airbeats.app/song?id=${metadata.id}"
+                                com.darkxvenom.airbeats.utils.RemoteConfigManager.getSongShareUrl(metadata.id)
                             )
                         }
                         context.startActivity(Intent.createChooser(intent, null))
@@ -2545,16 +2636,70 @@ fun BottomSheetPlayer(
                 },
                 shuffleModeEnabled = shuffleModeEnabled,
                 onShuffleClick = {
-                    playerConnection.player.shuffleModeEnabled = !playerConnection.player.shuffleModeEnabled
+                    playerConnection.toggleShuffle()
                 },
                 repeatMode = repeatMode,
-                onRepeatClick = { playerConnection.player.toggleRepeatMode() },
+                onRepeatClick = { playerConnection.toggleRepeatMode() },
                 onOpenFullscreenLyrics = onOpenFullscreenLyrics,
                 playerConnection = playerConnection,
                 navController = navController,
                 menuState = menuState,
                 nextUpMetadata = nextMediaMetadata,
                 currentFormat = currentFormat,
+                playerVolume = playerVolume.value,
+                onVolumeChange = { playerConnection.service.playerVolume.value = it },
+            )
+        } else if (playerScreenStyle == PlayerScreenStyle.MATERIAL) {
+            MaterialPlayer(
+                state = state,
+                mediaMetadata = mediaMetadata,
+                position = sliderPosition ?: position,
+                duration = duration,
+                isPlaying = isPlaying,
+                isLoading = playbackState != STATE_READY && playbackState != STATE_ENDED,
+                canSkipPrevious = canSkipPrevious,
+                canSkipNext = canSkipNext,
+                onSeek = { sliderPosition = it },
+                onSeekFinished = {
+                    sliderPosition?.let { playerConnection.player.seekTo(it) }
+                    sliderPosition = null
+                },
+                onPlayPause = { playerConnection.player.togglePlayPause() },
+                onPrevious = { playerConnection.player.seekToPrevious() },
+                onNext = { playerConnection.player.seekToNext() },
+                onCollapse = state::collapseSoft,
+                onMenuClick = {
+                    menuState.show {
+                        PlayerMenu(
+                            mediaMetadata = mediaMetadata ?: return@show,
+                            navController = navController,
+                            playerBottomSheetState = state,
+                            onShowDetailsDialog = { showDetailsDialog = true },
+                            onDismiss = menuState::dismiss,
+                        )
+                    }
+                },
+                isLiked = currentSong?.song?.liked == true,
+                onLikeClick = playerConnection::toggleLike,
+                onQueueClick = { queueSheetState.expandSoft() },
+                onShareClick = {
+                    mediaMetadata?.let { metadata ->
+                        val intent = Intent().apply {
+                            action = Intent.ACTION_SEND
+                            type = "text/plain"
+                            putExtra(
+                                Intent.EXTRA_TEXT,
+                                com.darkxvenom.airbeats.utils.RemoteConfigManager.getSongShareUrl(metadata.id)
+                            )
+                        }
+                        context.startActivity(Intent.createChooser(intent, null))
+                    }
+                },
+                onOpenFullscreenLyrics = onOpenFullscreenLyrics,
+                playerConnection = playerConnection,
+                navController = navController,
+                menuState = menuState,
+                currentLyrics = (spotifyLyricsEntity ?: currentLyrics),
                 playerVolume = playerVolume.value,
                 onVolumeChange = { playerConnection.service.playerVolume.value = it },
             )
@@ -2601,7 +2746,7 @@ fun BottomSheetPlayer(
                             type = "text/plain"
                             putExtra(
                                 Intent.EXTRA_TEXT,
-                                "https://play.airbeats.app/song?id=${metadata.id}"
+                                com.darkxvenom.airbeats.utils.RemoteConfigManager.getSongShareUrl(metadata.id)
                             )
                         }
                         context.startActivity(Intent.createChooser(intent, null))
@@ -2609,10 +2754,10 @@ fun BottomSheetPlayer(
                 },
                 shuffleModeEnabled = shuffleModeEnabled,
                 onShuffleClick = {
-                    playerConnection.player.shuffleModeEnabled = !playerConnection.player.shuffleModeEnabled
+                    playerConnection.toggleShuffle()
                 },
                 repeatMode = repeatMode,
-                onRepeatClick = { playerConnection.player.toggleRepeatMode() },
+                onRepeatClick = { playerConnection.toggleRepeatMode() },
                 onOpenFullscreenLyrics = onOpenFullscreenLyrics,
                 queueWindows = queueWindows.map { it.mediaItem },
                 currentWindowIndex = currentWindowIndex,
@@ -2645,9 +2790,13 @@ fun BottomSheetPlayer(
                         onOpenQueue = queueSheetState::expandSoft,
                         onOpenLyrics = onOpenFullscreenLyrics,
                         onDeviceClick = {
-                            Toast.makeText(context, playbackOutputName, Toast.LENGTH_SHORT).show()
+                            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S && !bluetoothPermissionGranted) {
+                                bluetoothPermissionLauncher.launch(Manifest.permission.BLUETOOTH_CONNECT)
+                            } else {
+                                showDeviceSheet = true
+                            }
                         },
-                        deviceName = playbackOutputName,
+                        deviceName = activeDevice?.outputName() ?: playbackOutputName,
                     )
                 }
             }
@@ -2727,35 +2876,34 @@ fun BottomSheetPlayer(
             }
         }
 
-        if (playerScreenStyle == PlayerScreenStyle.APPLE) {
-            AppleQueue(
-                state = queueSheetState
+        // The collapsed queue affordance (the up arrow) belongs only to Classic.
+        // Other player designs open this same queue from their own queue button.
+        if (playerScreenStyle == PlayerScreenStyle.CLASSIC || !queueSheetState.isCollapsed) {
+            UnifiedQueue(
+                state = queueSheetState,
+                playerBottomSheetState = state,
+                navController = navController,
             )
-        } else if (playerScreenStyle == PlayerScreenStyle.CLASSIC || !queueSheetState.isCollapsed) {
-            val bgCol = if (useBlackBackground) Color.Black else MaterialTheme.colorScheme.surfaceContainer
-            
-            if (enableNewQueueScreen) {
-                AlternateQueue(
-                    state = queueSheetState,
-                    playerBottomSheetState = state,
-                    navController = navController,
-                    backgroundColor = bgCol,
-                    onBackgroundColor = onBackgroundColor,
-                    TextBackgroundColor = TextBackgroundColor,
-                    textButtonColor = textButtonColor,
-                    iconButtonColor = iconButtonColor,
-                    pureBlack = pureBlack,
-                )
-            } else {
-                Queue(
-                    state = queueSheetState,
-                    playerBottomSheetState = state,
-                    navController = navController,
-                    backgroundColor = bgCol,
-                    onBackgroundColor = onBackgroundColor,
-                    textBackgroundColor = TextBackgroundColor,
-                )
-            }
+        }
+
+        // Show clear error popup dialog across all player screen styles whenever playback fails
+        val playbackError by playerConnection.error.collectAsState()
+        var dismissedErrorKey by rememberSaveable { mutableStateOf<String?>(null) }
+        val currentErrorKey = playbackError?.let { "${it.errorCode}_${it.message}_${mediaMetadata?.id}" }
+
+        if (playbackError != null && currentErrorKey != dismissedErrorKey) {
+            PlaybackErrorDialog(
+                error = playbackError!!,
+                mediaMetadata = mediaMetadata,
+                onDismiss = {
+                    dismissedErrorKey = currentErrorKey
+                },
+                onRetry = {
+                    dismissedErrorKey = null
+                    playerConnection.player.prepare()
+                    playerConnection.player.play()
+                },
+            )
         }
     }
 }
@@ -2979,7 +3127,11 @@ private fun SpotifyPlayerContent(
             if (canSkipNext) Color.White else Color.White.copy(alpha = 0.32f),
         )
         SpotifyPlainIconButton(
-            if (repeatMode == Player.REPEAT_MODE_ONE) R.drawable.repeat_one else R.drawable.repeat,
+            when (repeatMode) {
+                Player.REPEAT_MODE_ONE -> R.drawable.repeat_one
+                Player.REPEAT_MODE_ALL -> R.drawable.repeat_on
+                else -> R.drawable.repeat
+            },
             onRepeat,
             if (repeatMode == Player.REPEAT_MODE_OFF) Color.White else Color(0xFF1DB954),
         )
@@ -3684,13 +3836,7 @@ private fun resolvePlaybackOutputName(context: Context): String {
     return "Speaker"
 }
 
-private fun AudioDeviceInfo.isBluetoothOutput(): Boolean =
-    type == AudioDeviceInfo.TYPE_BLUETOOTH_A2DP ||
-        type == AudioDeviceInfo.TYPE_BLUETOOTH_SCO ||
-        (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S &&
-            (type == AudioDeviceInfo.TYPE_BLE_HEADSET ||
-                type == AudioDeviceInfo.TYPE_BLE_SPEAKER ||
-                type == AudioDeviceInfo.TYPE_BLE_BROADCAST))
+
 
 private fun AudioDeviceInfo.isWiredOutput(): Boolean =
     type == AudioDeviceInfo.TYPE_WIRED_HEADPHONES ||

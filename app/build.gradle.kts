@@ -19,10 +19,19 @@ val localProperties = Properties().apply {
         localPropertiesFile.inputStream().use { load(it) }
     }
 }
-val googleApiKey = localProperties.getProperty("google.api.key") ?: ""
-val statsApiKey = localProperties.getProperty("stats.api.key") ?: ""
-val statsBaseUrl = localProperties.getProperty("stats.base.url") ?: ""
-val authBaseUrl = localProperties.getProperty("auth.api.base.url") ?: ""
+val ciKeystoreFile = rootProject.file("app/keystore.jks")
+val localSigningFile = localProperties.getProperty("signing.keystore.file")
+    ?: (findProperty("android.injected.signing.store.file") as? String)
+    ?: (if (ciKeystoreFile.exists()) ciKeystoreFile.absolutePath else null)
+val localSigningStorePassword = localProperties.getProperty("signing.keystore.password")
+    ?: (findProperty("android.injected.signing.store.password") as? String)
+    ?: System.getenv("KEYSTORE_PASSWORD")
+val localSigningKeyAlias = localProperties.getProperty("signing.key.alias")
+    ?: (findProperty("android.injected.signing.key.alias") as? String)
+    ?: System.getenv("KEY_ALIAS")
+val localSigningKeyPassword = localProperties.getProperty("signing.key.password")
+    ?: (findProperty("android.injected.signing.key.password") as? String)
+    ?: System.getenv("KEY_PASSWORD")
 
 fun String.asBuildConfigString(): String =
     "\"${replace("\\", "\\\\").replace("\"", "\\\"")}\""
@@ -34,29 +43,61 @@ android {
 
     defaultConfig {
         applicationId = "com.darkxvenom.airbeats"
-        minSdk = 26
+        minSdk = 24
         targetSdk = 35
-        versionCode = 174
-        versionName = "6.0.3"
+        versionCode = 241
+        versionName = "6.2.1"
         testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
-        buildConfigField("String", "GOOGLE_API_KEY", googleApiKey.asBuildConfigString())
-        buildConfigField("String", "STATS_API_KEY", statsApiKey.asBuildConfigString())
-        buildConfigField("String", "STATS_BASE_URL", statsBaseUrl.asBuildConfigString())
-        buildConfigField("String", "AUTH_API_BASE_URL", authBaseUrl.asBuildConfigString())
-        
-        // Strip out language resources from libraries that the app doesn't support
-        resConfigs("en")
+    }
+
+    signingConfigs {
+        create("flappy") {
+            if (!localSigningFile.isNullOrBlank() && file(localSigningFile).exists()) {
+                storeFile = file(localSigningFile)
+                storePassword = localSigningStorePassword
+                keyAlias = localSigningKeyAlias
+                keyPassword = localSigningKeyPassword
+                enableV1Signing = true
+                enableV2Signing = true
+                enableV3Signing = true
+            }
+        }
+        getByName("debug") {
+            if (!localSigningFile.isNullOrBlank() && file(localSigningFile).exists()) {
+                storeFile = file(localSigningFile)
+                storePassword = localSigningStorePassword
+                keyAlias = localSigningKeyAlias
+                keyPassword = localSigningKeyPassword
+            } else if (System.getenv("MUSIC_DEBUG_SIGNING_STORE_PASSWORD") != null) {
+                storeFile = file(System.getenv("MUSIC_DEBUG_KEYSTORE_FILE"))
+                storePassword = System.getenv("MUSIC_DEBUG_SIGNING_STORE_PASSWORD")
+                keyAlias = "debug"
+                keyPassword = System.getenv("MUSIC_DEBUG_SIGNING_KEY_PASSWORD")
+            }
+        }
     }
 
     buildTypes {
         create("nightly") {
             initWith(getByName("release"))
+            matchingFallbacks += listOf("release")
+            signingConfig = if (!localSigningFile.isNullOrBlank() && file(localSigningFile).exists()) {
+                signingConfigs.getByName("flappy")
+            } else {
+                signingConfigs.getByName("debug")
+            }
             buildConfigField("boolean", "IS_NIGHTLY", "true")
             isMinifyEnabled = true
             isShrinkResources = true
+            isCrunchPngs = true
             proguardFiles(getDefaultProguardFile("proguard-android-optimize.txt"), "proguard-rules.pro")
         }
         release {
+            signingConfig = if (!localSigningFile.isNullOrBlank() && file(localSigningFile).exists()) {
+                signingConfigs.getByName("flappy")
+            } else {
+                signingConfigs.getByName("debug")
+            }
             buildConfigField("boolean", "IS_NIGHTLY", "false")
             isMinifyEnabled = true
             isShrinkResources = true
@@ -67,19 +108,13 @@ android {
             )
         }
         debug {
+            signingConfig = if (!localSigningFile.isNullOrBlank() && file(localSigningFile).exists()) {
+                signingConfigs.getByName("flappy")
+            } else {
+                signingConfigs.getByName("debug")
+            }
             buildConfigField("boolean", "IS_NIGHTLY", "false")
             applicationIdSuffix = ".debug"
-        }
-    }
-
-    signingConfigs {
-        getByName("debug") {
-            if (System.getenv("MUSIC_DEBUG_SIGNING_STORE_PASSWORD") != null) {
-                storeFile = file(System.getenv("MUSIC_DEBUG_KEYSTORE_FILE"))
-                storePassword = System.getenv("MUSIC_DEBUG_SIGNING_STORE_PASSWORD")
-                keyAlias = "debug"
-                keyPassword = System.getenv("MUSIC_DEBUG_SIGNING_KEY_PASSWORD")
-            }
         }
     }
 
@@ -126,12 +161,21 @@ android {
             excludes += "META-INF/LICENSE.md"
             excludes += "META-INF/NOTICE.md"
             excludes += "META-INF/*.md"
+            excludes += "org/bouncycastle/**/*.properties"
+            excludes += "**/*.bin.properties"
+            excludes += "com/google/api/client/**/*.p12"
+            excludes += "com/google/api/client/**/*.jks"
+            excludes += "**/*.proto"
         }
     }
 }
 
 ksp {
     arg("room.schemaLocation", "$projectDir/schemas")
+}
+
+configurations.all {
+    exclude(group = "org.json", module = "json")
 }
 
 dependencies {
@@ -168,8 +212,13 @@ dependencies {
     implementation(libs.media3)
     implementation(libs.media3.session)
     implementation(libs.media3.okhttp)
-    implementation("androidx.media3:media3-ui:1.8.0")
+    implementation(libs.media3.ui)
     implementation(libs.squigglyslider)
+
+    // Google Cast & local streaming proxy
+    implementation("com.google.android.gms:play-services-cast-framework:22.3.1")
+    implementation("androidx.mediarouter:mediarouter:1.7.0")
+    implementation("org.nanohttpd:nanohttpd:2.3.1")
 
     implementation(libs.room.runtime)
     implementation(libs.kotlinx.serialization.json)
@@ -182,16 +231,15 @@ dependencies {
     implementation(libs.work.runtime.ktx)
     implementation(libs.constraintlayout)
     implementation(libs.constraintlayout.compose)
-    implementation(libs.itextg)
-    implementation(libs.mpandroidchart)
     implementation(libs.foundation)
     implementation(libs.ui.graphics)
     implementation(platform("com.google.firebase:firebase-bom:34.11.0"))
     implementation("com.google.firebase:firebase-messaging")
+    implementation("com.google.firebase:firebase-config")
+    implementation("com.google.firebase:firebase-auth")
+    implementation("org.jetbrains.kotlinx:kotlinx-coroutines-play-services:1.8.1")
     ksp(libs.room.compiler)
     implementation(libs.room.ktx)
-
-    implementation(libs.apache.lang3)
 
     implementation(libs.hilt)
     implementation("org.jsoup:jsoup:1.18.1")
@@ -216,9 +264,15 @@ dependencies {
     implementation(projects.innertube)
     implementation(projects.kugou)
     implementation(projects.lrclib)
+<<<<<<< HEAD
     implementation(projects.kizzy)
     implementation(projects.spotify)
     implementation(project(":jossredconnect"))
+=======
+    implementation(projects.discordrpc)
+    implementation(projects.spotify)
+    implementation(project(":airconnect"))
+>>>>>>> d0x/main
     implementation(project(":shazamkit"))
     implementation(project(":betterlyrics"))
 
@@ -233,11 +287,3 @@ dependencies {
     implementation(libs.timber)
     testImplementation(libs.junit)
 }
-
-
-
-
-
-
-
-

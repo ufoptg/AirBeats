@@ -12,6 +12,8 @@ import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material3.*
+import androidx.compose.material3.ExperimentalMaterial3ExpressiveApi
+import androidx.compose.material3.LoadingIndicator
 import androidx.compose.material3.TopAppBarDefaults
 import androidx.compose.material3.TopAppBarScrollBehavior
 import androidx.compose.runtime.*
@@ -48,6 +50,9 @@ import com.darkxvenom.airbeats.LocalPlayerAwareWindowInsets
 import com.darkxvenom.airbeats.LocalPlayerConnection
 import com.darkxvenom.airbeats.R
 import com.darkxvenom.airbeats.ui.component.IconButton
+import com.darkxvenom.airbeats.ui.component.isFrostedGlassUiEnabled
+import com.darkxvenom.airbeats.ui.component.settingsCardContainerColor
+import com.darkxvenom.airbeats.ui.component.settingsCardBorder
 
 // ==================== SHIMMER EFFECT ====================
 
@@ -83,19 +88,28 @@ fun SocialIconBadge(
     iconRes: Int,
     onClick: () -> Unit
 ) {
+    val isFrosted = isFrostedGlassUiEnabled()
     Box(
         modifier = Modifier
             .size(32.dp)
             .clip(CircleShape)
-            .background(MaterialTheme.colorScheme.primary.copy(alpha = 0.1f))
-            .border(1.dp, MaterialTheme.colorScheme.primary.copy(alpha = 0.25f), CircleShape)
+            .background(
+                if (isFrosted) Color.White.copy(alpha = 0.08f)
+                else MaterialTheme.colorScheme.primary.copy(alpha = 0.1f)
+            )
+            .border(
+                1.dp,
+                if (isFrosted) Color.White.copy(alpha = 0.15f)
+                else MaterialTheme.colorScheme.primary.copy(alpha = 0.25f),
+                CircleShape
+            )
             .clickable(onClick = onClick),
         contentAlignment = Alignment.Center
     ) {
         Icon(
             painter = painterResource(id = iconRes),
             contentDescription = null,
-            tint = MaterialTheme.colorScheme.primary,
+            tint = if (isFrosted) MaterialTheme.colorScheme.onSurface else MaterialTheme.colorScheme.primary,
             modifier = Modifier.size(16.dp)
         )
     }
@@ -115,6 +129,7 @@ fun UserCard(
     onClick: () -> Unit
 ) {
     var isPressed by remember { mutableStateOf(false) }
+    val isFrosted = isFrostedGlassUiEnabled()
 
     val borderBrush = Brush.linearGradient(
         colors = listOf(
@@ -124,21 +139,28 @@ fun UserCard(
         )
     )
 
+    val cardBorder = if (isFrosted) {
+        settingsCardBorder(true) ?: androidx.compose.foundation.BorderStroke(1.dp, Color.White.copy(alpha = 0.12f))
+    } else {
+        androidx.compose.foundation.BorderStroke(1.dp, borderBrush)
+    }
+
     Card(
         modifier = modifier
             .padding(horizontal = 6.dp, vertical = 8.dp)
             .height(240.dp)
             .scale(if (isPressed) 0.98f else 1f)
-            .shadow(
-                elevation = 16.dp,
-                shape = RoundedCornerShape(24.dp),
-                ambientColor = MaterialTheme.colorScheme.primary,
-                spotColor = MaterialTheme.colorScheme.primary
-            )
-            .border(
-                width = 1.dp,
-                brush = borderBrush,
-                shape = RoundedCornerShape(24.dp)
+            .then(
+                if (isFrosted) {
+                    Modifier
+                } else {
+                    Modifier.shadow(
+                        elevation = 16.dp,
+                        shape = RoundedCornerShape(24.dp),
+                        ambientColor = MaterialTheme.colorScheme.primary,
+                        spotColor = MaterialTheme.colorScheme.primary
+                    )
+                }
             )
             .clickable(
                 interactionSource = remember { MutableInteractionSource() },
@@ -149,8 +171,9 @@ fun UserCard(
                 isPressed = false
             },
         shape = RoundedCornerShape(24.dp),
+        border = cardBorder,
         colors = CardDefaults.cardColors(
-            containerColor = MaterialTheme.colorScheme.surfaceContainer,
+            containerColor = if (isFrosted) settingsCardContainerColor(true) else MaterialTheme.colorScheme.surfaceContainer,
         )
     ) {
         Column(
@@ -169,14 +192,29 @@ fun UserCard(
                         .size(76.dp)
                         .clip(CircleShape)
                         .background(
-                            Brush.radialGradient(
-                                colors = listOf(
-                                    MaterialTheme.colorScheme.primary.copy(alpha = 0.2f),
-                                    MaterialTheme.colorScheme.primary.copy(alpha = 0.05f)
+                            if (isFrosted) {
+                                Brush.radialGradient(
+                                    colors = listOf(
+                                        Color.White.copy(alpha = 0.12f),
+                                        Color.White.copy(alpha = 0.04f)
+                                    )
                                 )
-                            )
+                            } else {
+                                Brush.radialGradient(
+                                    colors = listOf(
+                                        MaterialTheme.colorScheme.primary.copy(alpha = 0.2f),
+                                        MaterialTheme.colorScheme.primary.copy(alpha = 0.05f)
+                                    )
+                                )
+                            }
                         )
-                        .border(1.5.dp, borderBrush, CircleShape)
+                        .then(
+                            if (isFrosted) {
+                                Modifier.border(1.dp, Color.White.copy(alpha = 0.18f), CircleShape)
+                            } else {
+                                Modifier.border(1.5.dp, borderBrush, CircleShape)
+                            }
+                        )
                 ) {
                     AsyncImage(
                         model = ImageRequest.Builder(LocalContext.current)
@@ -205,7 +243,8 @@ fun UserCard(
 
                 Surface(
                     shape = RoundedCornerShape(50),
-                    color = MaterialTheme.colorScheme.primary.copy(alpha = 0.15f)
+                    color = if (isFrosted) Color.White.copy(alpha = 0.08f) else MaterialTheme.colorScheme.primary.copy(alpha = 0.15f),
+                    border = if (isFrosted) androidx.compose.foundation.BorderStroke(1.dp, Color.White.copy(alpha = 0.12f)) else null
                 ) {
                     Text(
                         text = role,
@@ -214,7 +253,7 @@ fun UserCard(
                             vertical = 4.dp
                         ),
                         style = MaterialTheme.typography.labelSmall,
-                        color = MaterialTheme.colorScheme.primary,
+                        color = if (isFrosted) MaterialTheme.colorScheme.onSurface else MaterialTheme.colorScheme.primary,
                         fontWeight = FontWeight.Bold
                     )
                 }
@@ -223,7 +262,8 @@ fun UserCard(
                     Spacer(modifier = Modifier.height(4.dp))
                     Surface(
                         shape = RoundedCornerShape(50),
-                        color = MaterialTheme.colorScheme.primary.copy(alpha = 0.15f)
+                        color = if (isFrosted) Color.White.copy(alpha = 0.08f) else MaterialTheme.colorScheme.primary.copy(alpha = 0.15f),
+                        border = if (isFrosted) androidx.compose.foundation.BorderStroke(1.dp, Color.White.copy(alpha = 0.12f)) else null
                     ) {
                         Text(
                             text = "$commits Commits",
@@ -232,7 +272,7 @@ fun UserCard(
                                 vertical = 4.dp
                             ),
                             style = MaterialTheme.typography.labelSmall,
-                            color = MaterialTheme.colorScheme.primary,
+                            color = if (isFrosted) MaterialTheme.colorScheme.onSurface else MaterialTheme.colorScheme.primary,
                             fontWeight = FontWeight.Bold
                         )
                     }
@@ -284,6 +324,7 @@ fun UserCard(
 
 @Composable
 fun SocialIconRow(uriHandler: UriHandler) {
+    val isFrosted = isFrostedGlassUiEnabled()
     Card(
         modifier = Modifier
             .fillMaxWidth()
@@ -291,8 +332,9 @@ fun SocialIconRow(uriHandler: UriHandler) {
             .shadow(4.dp, RoundedCornerShape(28.dp)),
         shape = RoundedCornerShape(28.dp),
         colors = CardDefaults.cardColors(
-            containerColor = MaterialTheme.colorScheme.surfaceContainer.copy(alpha = 0.8f)
-        )
+            containerColor = settingsCardContainerColor(isFrosted)
+        ),
+        border = settingsCardBorder(isFrosted)
     ) {
         Row(
             modifier = Modifier
@@ -357,7 +399,7 @@ fun SocialIconRow(uriHandler: UriHandler) {
 
 // ==================== MAIN ABOUT SCREEN ====================
 
-@OptIn(ExperimentalMaterial3Api::class)
+@OptIn(ExperimentalMaterial3Api::class, ExperimentalMaterial3ExpressiveApi::class)
 @Composable
 fun AboutScreen(
     navController: NavController,
@@ -367,6 +409,7 @@ fun AboutScreen(
     val context = LocalContext.current
     val shimmerBrush = shimmerEffect()
     var logoTapCount by remember { mutableIntStateOf(0) }
+    var versionTapCount by remember { mutableIntStateOf(0) }
 
     val infiniteTransition = rememberInfiniteTransition(label = "")
     val logoScale by infiniteTransition.animateFloat(
@@ -385,41 +428,11 @@ fun AboutScreen(
         ?: remember { mutableStateOf(null) }
 
     Box(modifier = Modifier.fillMaxSize()) {
-        // 🎵 BLUR BACKGROUND
+        // Adaptive background: blurred song thumbnail when playing, Library mesh when no song playing
         val artworkUrl = mediaMetadata?.thumbnailUrl
-
-        artworkUrl?.let { imageUrl ->
-            com.darkxvenom.airbeats.ui.component.BlurredBackground(
-                model = imageUrl
-            )
-
-            val isDarkTheme =
-                MaterialTheme.colorScheme.background.luminance() < 0.5f
-
-            val overlayBrush = if (isDarkTheme) {
-                Brush.verticalGradient(
-                    listOf(
-                        Color.Black.copy(alpha = 0.2f),
-                        Color.Black.copy(alpha = 0.5f),
-                        Color.Black.copy(alpha = 0.85f)
-                    )
-                )
-            } else {
-                Brush.verticalGradient(
-                    listOf(
-                        MaterialTheme.colorScheme.surface.copy(alpha = 0.25f),
-                        MaterialTheme.colorScheme.surface.copy(alpha = 0.5f),
-                        MaterialTheme.colorScheme.background.copy(alpha = 0.85f)
-                    )
-                )
-            }
-
-            Box(
-                modifier = Modifier
-                    .fillMaxSize()
-                    .background(overlayBrush)
-            )
-        }
+        com.darkxvenom.airbeats.ui.component.ScreenAdaptiveBackground(
+            artworkUrl = artworkUrl
+        )
 
         // Main Scaffold with new TopAppBar
         Scaffold(
@@ -573,6 +586,10 @@ fun AboutScreen(
                             style = MaterialTheme.typography.labelSmall,
                             color = MaterialTheme.colorScheme.secondary,
                             modifier = Modifier
+                                .clip(CircleShape)
+                                .clickable {
+                                    navController.navigate("settings/app_info")
+                                }
                                 .border(
                                     width = 1.dp,
                                     color = MaterialTheme.colorScheme.secondary,
@@ -683,7 +700,7 @@ fun AboutScreen(
                     ) {
                         UserCard(
                             imageUrl = "https://avatars.githubusercontent.com/u/218248866",
-                            name = "Darkboy",
+                            name = "⏤𝑫ꫝ𝒓𝒌𝒃𝒐𝒚 ꯭𖠌𐎙ꭙ⁷",
                             role = "Lead Developer",
                             commits = founderCommits["d0x-dev"],
                             githubUrl = "https://github.com/d0x-dev",
@@ -696,11 +713,11 @@ fun AboutScreen(
 
                         UserCard(
                             imageUrl = "https://avatars.githubusercontent.com/u/241423835",
-                            name = "Venom",
+                            name = "V E N O M",
                             role = "UI/UX Specialist",
                             commits = founderCommits["drkvenom786"],
                             githubUrl = "https://github.com/drkvenom786",
-                            websiteUrl = "https://venomx.pro",
+                            websiteUrl = "https://drkvenom786.github.io/webpage/",
                             modifier = Modifier.weight(1f),
                             onClick = { navController.navigate("contributor/drkvenom786") }
                         )
@@ -710,10 +727,14 @@ fun AboutScreen(
                     // Dynamic Contributors Section
 
                     if (isLoadingContributors) {
-                        CircularProgressIndicator(
-                            modifier = Modifier.align(Alignment.CenterHorizontally).padding(16.dp),
-                            color = MaterialTheme.colorScheme.primary
-                        )
+                        Box(
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .padding(vertical = 24.dp),
+                            contentAlignment = Alignment.Center
+                        ) {
+                            LoadingIndicator()
+                        }
                     } else if (contributors.isNotEmpty()) {
                         Row(verticalAlignment = Alignment.CenterVertically) {
                             Icon(painterResource(R.drawable.github), contentDescription = null, tint = MaterialTheme.colorScheme.primary, modifier = Modifier.size(24.dp))
@@ -765,4 +786,22 @@ fun AboutScreen(
 
 
 
+
+
+@OptIn(androidx.compose.material3.ExperimentalMaterial3Api::class)
+@androidx.compose.ui.tooling.preview.Preview(showBackground = true)
+@Composable
+fun AboutScreenPreview() {
+    com.darkxvenom.airbeats.ui.theme.AirBeatsTheme {
+        androidx.compose.runtime.CompositionLocalProvider(
+            com.darkxvenom.airbeats.LocalPlayerAwareWindowInsets provides androidx.compose.foundation.layout.WindowInsets(0, 0, 0, 0)
+        ) {
+            val scrollBehavior = androidx.compose.material3.TopAppBarDefaults.exitUntilCollapsedScrollBehavior()
+            AboutScreen(
+                navController = androidx.navigation.compose.rememberNavController(),
+                scrollBehavior = scrollBehavior
+            )
+        }
+    }
+}
 

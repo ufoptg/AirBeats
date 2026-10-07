@@ -17,6 +17,8 @@ jobs:
     steps:
       - name: Checkout Code
         uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
 
       - name: Set up JDK 21
         uses: actions/setup-java@v4
@@ -33,23 +35,65 @@ jobs:
       - name: Inject Google Services JSON and local.properties
         env:
           GOOGLE_SERVICES_JSON: ${{ secrets.GOOGLE_SERVICES_JSON }}
-          GOOGLE_API_KEY: ${{ secrets.GOOGLE_API_KEY }}
-          STATS_API_KEY: ${{ secrets.STATS_API_KEY }}
-          STATS_BASE_URL: ${{ secrets.STATS_BASE_URL }}
-          AUTH_API_BASE_URL: ${{ secrets.AUTH_API_BASE_URL }}
         run: |
-          echo "${GOOGLE_SERVICES_JSON}" | base64 --decode > app/google-services.json
+          if [ -z "${GOOGLE_SERVICES_JSON}" ]; then
+            cat <<EOF > app/google-services.json
+          {
+            "project_info": { "project_number": "1234567890", "project_id": "dummy-project" },
+            "client": [ 
+              { "client_info": { "mobilesdk_app_id": "1:1234567890:android:abcdef123456", "android_client_info": { "package_name": "com.darkxvenom.airbeats" } }, "api_key": [ { "current_key": "dummy-key" } ] },
+              { "client_info": { "mobilesdk_app_id": "1:1234567890:android:abcdef123456", "android_client_info": { "package_name": "com.darkxvenom.airbeats.debug" } }, "api_key": [ { "current_key": "dummy-key" } ] }
+            ],
+            "configuration_version": "1"
+          }
+          EOF
+          else
+            echo "${GOOGLE_SERVICES_JSON}" | base64 --decode > app/google-services.json
+          fi
           
-          echo "google.api.key=${GOOGLE_API_KEY}" >> local.properties
-          echo "stats.api.key=${STATS_API_KEY}" >> local.properties
-          echo "stats.base.url=${STATS_BASE_URL}" >> local.properties
-          echo "auth.api.base.url=${AUTH_API_BASE_URL}" >> local.properties
 
       - name: Build Debug APK
         run: ./gradlew assembleDebug
+
+      - name: Prepare Debug APK & Changelog
+        run: |
+          VERSION_NAME=$(grep -oP 'versionName = "\K[^"]+' app/build.gradle.kts || echo "debug")
+          DEBUG_APK=$(find app/build/outputs/apk/debug -name "*.apk" | head -n 1)
+          if [ -z "$DEBUG_APK" ]; then
+            echo "Error: No debug APK found in app/build/outputs/apk/debug"
+            exit 1
+          fi
+          FINAL_APK_NAME="AirBeats-v${VERSION_NAME}-Debug.apk"
+          cp "$DEBUG_APK" "$FINAL_APK_NAME"
+          echo "FINAL_APK_NAME=$FINAL_APK_NAME" >> $GITHUB_ENV
+          echo "VERSION_NAME=$VERSION_NAME" >> $GITHUB_ENV
+
+          # Generate commit changelog
+          COMMITS=$(git log -n 5 --pretty=format:"• %s (%h)" --no-merges || echo "")
+          if [ -z "$COMMITS" ]; then
+            COMMITS="• Continuous integration debug build from main branch."
+          fi
+          echo "CHANGELOG<<EOF" >> $GITHUB_ENV
+          echo "$COMMITS" >> $GITHUB_ENV
+          echo "EOF" >> $GITHUB_ENV
 
       - name: Upload APK
         uses: actions/upload-artifact@v4
         with:
           name: AirBeats-Debug-APK
-          path: app/build/outputs/apk/debug/*.apk
+          path: ${{ env.FINAL_APK_NAME }}
+
+      - name: Upload Debug APK to Telegram (Topic 44)
+        continue-on-error: true
+        env:
+          BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
+          CHAT_ID: "-1004388752678"
+          THREAD_ID: "44"
+          VERSION: ${{ env.VERSION_NAME }}
+          APK_FILE: ${{ env.FINAL_APK_NAME }}
+          RELEASE_TYPE: "Debug Build"
+          CHANGELOG: ${{ env.CHANGELOG }}
+          RELEASE_URL: "https://github.com/d0x-dev/AirBeats/actions/runs/${{ github.run_id }}"
+        run: |
+          pip install requests
+          python3 .github/scripts/upload_to_telegram.py

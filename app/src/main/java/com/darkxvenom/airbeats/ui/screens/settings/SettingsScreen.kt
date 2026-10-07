@@ -75,6 +75,13 @@ import com.darkxvenom.airbeats.constants.InnerTubeCookieKey
 import com.darkxvenom.airbeats.ui.component.AvatarPreferenceManager
 import com.darkxvenom.airbeats.ui.component.AvatarSelection
 import com.darkxvenom.airbeats.ui.component.ChangelogScreen
+import com.darkxvenom.airbeats.ui.component.UpdateAvailableDialog
+import com.darkxvenom.airbeats.ui.component.isFrostedGlassUiEnabled
+import com.darkxvenom.airbeats.ui.component.settingsCardContainerColor
+import com.darkxvenom.airbeats.ui.component.settingsCardBorder
+import com.darkxvenom.airbeats.utils.RemoteConfigManager
+import com.darkxvenom.airbeats.utils.UpdateInfo
+import com.darkxvenom.airbeats.utils.Updater
 import com.darkxvenom.airbeats.utils.rememberPreference
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
@@ -123,12 +130,14 @@ fun SettingsCategory(
             color = MaterialTheme.colorScheme.primary.copy(alpha = 0.9f)
         )
 
+        val isFrosted = isFrostedGlassUiEnabled()
         Card(
             modifier = Modifier.fillMaxWidth(),
             shape = RoundedCornerShape(28.dp),
             colors = CardDefaults.cardColors(
-                containerColor = MaterialTheme.colorScheme.surfaceContainer.copy(alpha = 0.8f)
+                containerColor = settingsCardContainerColor(isFrosted)
             ),
+            border = settingsCardBorder(isFrosted),
             elevation = CardDefaults.cardElevation(defaultElevation = 0.dp)
         ) {
             Column(
@@ -241,12 +250,14 @@ fun GlassCard(
     modifier: Modifier = Modifier,
     content: @Composable () -> Unit
 ) {
+    val isFrosted = isFrostedGlassUiEnabled()
     Card(
         modifier = modifier,
         shape = RoundedCornerShape(28.dp),
         colors = CardDefaults.cardColors(
-            containerColor = MaterialTheme.colorScheme.surfaceContainer.copy(alpha = 0.8f)
+            containerColor = settingsCardContainerColor(isFrosted)
         ),
+        border = settingsCardBorder(isFrosted),
         elevation = CardDefaults.cardElevation(defaultElevation = 0.dp)
     ) {
         content()
@@ -376,8 +387,6 @@ fun WaterDropIconButton(
 
 // ==================== ORIGINAL FUNCTIONS ====================
 
-@SuppressLint("ObsoleteSdkInt")
-@RequiresApi(Build.VERSION_CODES.TIRAMISU)
 fun getAppVersion(context: Context): String {
     return try {
         val packageInfo = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
@@ -398,9 +407,8 @@ fun getAppVersion(context: Context): String {
     }
 }
 
-@RequiresApi(Build.VERSION_CODES.TIRAMISU)
 @Composable
-fun VersionCard(uriHandler: UriHandler) {
+fun VersionCard(uriHandler: UriHandler, navController: NavController? = null) {
     val context = LocalContext.current
     val appVersion = remember { getAppVersion(context) }
 
@@ -460,7 +468,13 @@ fun VersionCard(uriHandler: UriHandler) {
                                 )
                             }
                         },
-                        onClick = { uriHandler.openUri("https://github.com/d0x-dev/AirBeats/releases/latest") }
+                        onClick = {
+                            if (navController != null) {
+                                navController.navigate("settings/app_info")
+                            } else {
+                                uriHandler.openUri(com.darkxvenom.airbeats.utils.RemoteConfigManager.getLatestReleasePageUrl())
+                            }
+                        }
                     ),
                     isLast = false
                 )
@@ -496,7 +510,11 @@ fun VersionCard(uriHandler: UriHandler) {
                                 )
                             }
                         },
-                        onClick = { uriHandler.openUri("https://airbeats.app") }
+                        onClick = {
+                            val url = com.darkxvenom.airbeats.utils.RemoteConfigManager.websiteUrl
+                            val safeUrl = if (url.startsWith("http://", ignoreCase = true) || url.startsWith("https://", ignoreCase = true)) url else "https://$url"
+                            runCatching { uriHandler.openUri(safeUrl) }
+                        }
                     ),
                     isLast = true
                 )
@@ -510,18 +528,33 @@ fun UpdateCard(latestVersion: String = "") {
     val context = LocalContext.current
     var showUpdateCard by remember { mutableStateOf(false) }
     var currentLatestVersion by remember { mutableStateOf(latestVersion) }
+    var updateInfoState by remember { mutableStateOf<UpdateInfo?>(null) }
     var showDownloadDialog by remember { mutableStateOf(false) }
 
     LaunchedEffect(Unit) {
-        val newVersion = checkForUpdates()
-        if (newVersion != null && isNewerVersion(newVersion, BuildConfig.VERSION_NAME)) {
-            showUpdateCard = true
-            currentLatestVersion = newVersion
+        Updater.getLatestUpdateInfo().onSuccess { info ->
+            if (info.versionName.isNotBlank() && isNewerVersion(info.versionName, BuildConfig.VERSION_NAME)) {
+                showUpdateCard = true
+                currentLatestVersion = info.versionName
+                updateInfoState = info
+            }
+        }.onFailure {
+            val newVersion = checkForUpdates()
+            if (newVersion != null && isNewerVersion(newVersion, BuildConfig.VERSION_NAME)) {
+                showUpdateCard = true
+                currentLatestVersion = newVersion
+                updateInfoState = UpdateInfo(versionName = newVersion)
+            }
         }
     }
 
     if (showDownloadDialog) {
-        UpdateDownloadDialog(
+        updateInfoState?.let { info ->
+            UpdateAvailableDialog(
+                updateInfo = info,
+                onDismiss = { showDownloadDialog = false }
+            )
+        } ?: UpdateDownloadDialog(
             latestVersion = currentLatestVersion,
             onDismiss = { showDownloadDialog = false }
         )
@@ -663,11 +696,10 @@ fun UpdateDownloadDialog(
                             WaterDropButton(
                                 onClick = {
                                     downloadStatus = DownloadStatus.REDIRECTING
-                                    val downloadUrl = if (com.darkxvenom.airbeats.BuildConfig.IS_NIGHTLY) {
-                                        "https://github.com/d0x-dev/AirBeats/releases/download/v${latestVersion}-nightly/Airbeats-v${latestVersion}-Nightly.apk"
-                                    } else {
-                                        "https://github.com/d0x-dev/AirBeats/releases/download/v$latestVersion/AirBeats_v${latestVersion}_signed.apk"
-                                    }
+                                    val downloadUrl = com.darkxvenom.airbeats.utils.RemoteConfigManager.getApkDownloadUrl(
+                                        latestVersion,
+                                        com.darkxvenom.airbeats.BuildConfig.IS_NIGHTLY
+                                    )
                                     uriHandler.openUri(downloadUrl)
                                     downloadStatus = DownloadStatus.COMPLETED
                                     onDismiss()
@@ -742,7 +774,7 @@ enum class DownloadStatus {
 suspend fun checkForUpdates(): String? = withContext(Dispatchers.IO) {
     try {
         if (com.darkxvenom.airbeats.BuildConfig.IS_NIGHTLY) {
-            val url = java.net.URL("https://api.github.com/repos/d0x-dev/AirBeats/releases")
+            val url = java.net.URL(com.darkxvenom.airbeats.utils.RemoteConfigManager.getLatestReleaseApiUrl(isNightly = true))
             val connection = url.openConnection()
             connection.connect()
             val json = connection.getInputStream().bufferedReader().use { it.readText() }
@@ -756,7 +788,7 @@ suspend fun checkForUpdates(): String? = withContext(Dispatchers.IO) {
             }
             return@withContext null
         } else {
-            val url = java.net.URL("https://api.github.com/repos/d0x-dev/AirBeats/releases/latest")
+            val url = java.net.URL(com.darkxvenom.airbeats.utils.RemoteConfigManager.getLatestReleaseApiUrl(isNightly = false))
             val connection = url.openConnection()
             connection.connect()
             val json = connection.getInputStream().bufferedReader().use { it.readText() }
@@ -792,7 +824,6 @@ fun isNewerVersion(remoteVersion: String, currentVersion: String): Boolean {
 }
 
 // ==================== MAIN SETTINGS SCREEN ====================
-@RequiresApi(Build.VERSION_CODES.TIRAMISU)
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
 fun SettingsScreen(
@@ -810,41 +841,11 @@ fun SettingsScreen(
         ?: remember { mutableStateOf(null) }
 
     Box(modifier = Modifier.fillMaxSize()) {
-        // 🎵 BLUR BACKGROUND
+        // Adaptive background: blurred song thumbnail when playing, Library mesh when no song playing
         val artworkUrl = mediaMetadata?.thumbnailUrl
-
-        artworkUrl?.let { imageUrl ->
-            com.darkxvenom.airbeats.ui.component.BlurredBackground(
-                model = imageUrl
-            )
-
-            val isDarkTheme =
-                MaterialTheme.colorScheme.background.luminance() < 0.5f
-
-            val overlayBrush = if (isDarkTheme) {
-                Brush.verticalGradient(
-                    listOf(
-                        Color.Black.copy(alpha = 0.2f),
-                        Color.Black.copy(alpha = 0.5f),
-                        Color.Black.copy(alpha = 0.85f)
-                    )
-                )
-            } else {
-                Brush.verticalGradient(
-                    listOf(
-                        MaterialTheme.colorScheme.surface.copy(alpha = 0.25f),
-                        MaterialTheme.colorScheme.surface.copy(alpha = 0.5f),
-                        MaterialTheme.colorScheme.background.copy(alpha = 0.85f)
-                    )
-                )
-            }
-
-            Box(
-                modifier = Modifier
-                    .fillMaxSize()
-                    .background(overlayBrush)
-            )
-        }
+        com.darkxvenom.airbeats.ui.component.ScreenAdaptiveBackground(
+            artworkUrl = artworkUrl
+        )
 
         // Main Scaffold with TopAppBar that scrolls
         Scaffold(
@@ -993,6 +994,16 @@ fun SettingsScreen(
                                 onClick = { navController.navigate("settings/content") }
                             ),
                             SettingsCategoryItem(
+                                icon = painterResource(R.drawable.lyrics),
+                                title = { Text("Lyrics", color = MaterialTheme.colorScheme.onSurface) },
+                                onClick = { navController.navigate("settings/lyrics") }
+                            ),
+                            SettingsCategoryItem(
+                                icon = painterResource(R.drawable.ic_gen_ai),
+                                title = { Text("AI Integration", color = MaterialTheme.colorScheme.onSurface) },
+                                onClick = { navController.navigate("settings/ai") }
+                            ),
+                            SettingsCategoryItem(
                                 icon = painterResource(R.drawable.play),
                                 title = {
                                     Text(
@@ -1001,6 +1012,36 @@ fun SettingsScreen(
                                     )
                                 },
                                 onClick = { navController.navigate("settings/player") }
+                            ),
+                            SettingsCategoryItem(
+                                icon = painterResource(R.drawable.swipe),
+                                title = {
+                                    Text(
+                                        "Gestures",
+                                        color = MaterialTheme.colorScheme.onSurface
+                                    )
+                                },
+                                onClick = { navController.navigate("settings/gestures") }
+                            ),
+                            SettingsCategoryItem(
+                                icon = painterResource(R.drawable.graphic_eq),
+                                title = {
+                                    Text(
+                                        "Scrobbler",
+                                        color = MaterialTheme.colorScheme.onSurface
+                                    )
+                                },
+                                onClick = { navController.navigate("settings/scrobbler") }
+                            ),
+                            SettingsCategoryItem(
+                                icon = painterResource(R.drawable.play),
+                                title = {
+                                    Text(
+                                        "Android Auto",
+                                        color = MaterialTheme.colorScheme.onSurface
+                                    )
+                                },
+                                onClick = { navController.navigate("settings/android_auto") }
                             ),
                             SettingsCategoryItem(
                                 icon = painterResource(R.drawable.group),
@@ -1060,6 +1101,16 @@ fun SettingsScreen(
                         title = stringResource(R.string.community),
                         items = listOf(
                             SettingsCategoryItem(
+                                icon = painterResource(R.drawable.newspaper),
+                                title = {
+                                    Text(
+                                        "News from Developers",
+                                        color = MaterialTheme.colorScheme.onSurface
+                                    )
+                                },
+                                onClick = { navController.navigate("settings/developer_news") }
+                            ),
+                            SettingsCategoryItem(
                                 icon = painterResource(R.drawable.info),
                                 title = {
                                     Text(
@@ -1093,11 +1144,14 @@ fun SettingsScreen(
                                 icon = painterResource(R.drawable.telegram),
                                 title = {
                                     Text(
-                                        "Telegram Bot",
+                                        "Telegram",
                                         color = MaterialTheme.colorScheme.onSurface
                                     )
                                 },
-                                onClick = { uriHandler.openUri("https://t.me/Stormxmusicrobot") }
+                                onClick = {
+                                    val telegramUrl = RemoteConfigManager.telegramUrl.ifBlank { RemoteConfigManager.DEFAULT_TELEGRAM_URL }
+                                    uriHandler.openUri(telegramUrl)
+                                }
                             )
                         )
                     )
@@ -1107,7 +1161,7 @@ fun SettingsScreen(
                 UpdateCard()
 
                 // Version Card
-                VersionCard(uriHandler)
+                VersionCard(uriHandler, navController)
 
                 Spacer(Modifier.height(32.dp))
             }

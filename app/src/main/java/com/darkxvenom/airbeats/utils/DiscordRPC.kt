@@ -3,13 +3,13 @@ package com.darkxvenom.airbeats.utils
 import android.content.Context
 import com.darkxvenom.airbeats.R
 import com.darkxvenom.airbeats.db.entities.Song
-import com.darkxvenom.airbeats.kizzy.rpc.KizzyRPC
-import com.darkxvenom.airbeats.kizzy.rpc.RpcImage
+import com.darkxvenom.airbeats.discordrpc.rpc.DiscordRpcClient
+import com.darkxvenom.airbeats.discordrpc.rpc.RpcImage
 
 class DiscordRPC(
     val context: Context,
     token: String,
-) : KizzyRPC(token) {
+) : DiscordRpcClient(token) {
     suspend fun updateSong(song: Song, currentPlaybackTimeMillis: Long, playbackSpeed: Float = 1.0f, useDetails: Boolean = false) = runCatching {
         val currentTime = System.currentTimeMillis()
 
@@ -29,14 +29,14 @@ class DiscordRPC(
             name = context.getString(R.string.app_name).removeSuffix(" Debug"),
             details = songTitleWithRate,
             state = song.artists.joinToString { it.name },
-            detailsUrl = "https://play.airbeats.app/song?id=${song.song.id}",
+            detailsUrl = com.darkxvenom.airbeats.utils.RemoteConfigManager.getSongShareUrl(song.song.id),
             largeImage = song.song.thumbnailUrl?.let { RpcImage.ExternalImage(it) },
             smallImage = song.artists.firstOrNull()?.thumbnailUrl?.let { RpcImage.ExternalImage(it) },
             largeText = song.album?.title,
             smallText = song.artists.firstOrNull()?.name,
             buttons = listOf(
-                "Listen on YouTube Music" to "https://play.airbeats.app/song?id=${song.song.id}",
-                "Visit AirBeats" to "https://github.com/darkxvenom/airbeats"
+                "Listen on YouTube Music" to com.darkxvenom.airbeats.utils.RemoteConfigManager.getSongShareUrl(song.song.id),
+                "Visit AirBeats" to com.darkxvenom.airbeats.utils.RemoteConfigManager.websiteUrl
             ),
             type = Type.LISTENING,
             statusDisplayType = if (useDetails) StatusDisplayType.DETAILS else StatusDisplayType.STATE,
