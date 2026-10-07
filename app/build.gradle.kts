@@ -264,15 +264,9 @@ dependencies {
     implementation(projects.innertube)
     implementation(projects.kugou)
     implementation(projects.lrclib)
-<<<<<<< HEAD
-    implementation(projects.kizzy)
-    implementation(projects.spotify)
-    implementation(project(":jossredconnect"))
-=======
     implementation(projects.discordrpc)
     implementation(projects.spotify)
     implementation(project(":airconnect"))
->>>>>>> d0x/main
     implementation(project(":shazamkit"))
     implementation(project(":betterlyrics"))
 
