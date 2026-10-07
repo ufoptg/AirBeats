@@ -45,8 +45,8 @@ android {
         applicationId = "com.darkxvenom.airbeats"
         minSdk = 24
         targetSdk = 35
-        versionCode = 241
-        versionName = "6.2.1"
+        versionCode = 242
+        versionName = "6.2.2"
         testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
     }
 
